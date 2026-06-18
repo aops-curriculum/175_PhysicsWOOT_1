@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Photoelectric Effect</title>
+  <!-- Original AoPS interactive. Replaces the third-party "Photoelectric Effect" simulation. -->
+<script>
+// EigenNode auto-height v2.4
+(function() {
+  // 4px buffer for subpixel rounding + parent's >=3px noise threshold.
+  // Extra 18px when horizontal overflow forces a scrollbar (eats vertical
+  // space inside the iframe — AoPS classroom embeds in a narrower column
+  // than the 600px content, so a horizontal scrollbar appears and steals
+  // ~10-17px of height). Without this, the iframe ends up ~11-15px short.
+  var BUFFER = 4;
+  var H_SCROLLBAR = 18;
+  var measuring = false;
+  function measure() {
+    if (measuring) return 0;
+    var b = document.body, h = document.documentElement;
+    if (!b) return 0;
+    measuring = true;
+    // Temporarily neutralise body's height/min-height (overriding stylesheet
+    // rules with !important) so scrollHeight reflects actual content extent.
+    // Without this, patterns like body { height: 100vh } cause scrollHeight
+    // to echo the iframe's current viewport — adding BUFFER each cycle
+    // ratchets the iframe taller forever. Browser doesn't paint until this
+    // synchronous block returns, so no visible flicker.
+    var hOld = b.style.height, hPri = b.style.getPropertyPriority('height');
+    var mOld = b.style.minHeight, mPri = b.style.getPropertyPriority('min-height');
+    b.style.setProperty('height', 'auto', 'important');
+    b.style.setProperty('min-height', '0', 'important');
+    var content = b.scrollHeight || 0;
+    if (hOld) b.style.setProperty('height', hOld, hPri); else b.style.removeProperty('height');
+    if (mOld) b.style.setProperty('min-height', mOld, mPri); else b.style.removeProperty('min-height');
+    measuring = false;
+    // Check the documentElement only — that's the element that owns the
+    // iframe's horizontal scrollbar. Body can be narrower than the iframe
+    // (e.g. body{width:600px} centered in a 700px iframe) and have its own
+    // 1-2px overflow that doesn't actually trigger a scrollbar.
+    var hOverflow = h && (h.scrollWidth - h.clientWidth) >= 4;
+    return Math.ceil(content) + BUFFER + (hOverflow ? H_SCROLLBAR : 0);
+  }
+  var last = 0;
+  function report() {
+    var h = measure();
+    if (h > 0 && Math.abs(h - last) >= 2) {
+      last = h;
+      window.parent.postMessage({ type: 'resize', height: h }, '*');
+    }
+  }
+  window.addEventListener('load', report);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(report);
+  if (window.ResizeObserver && document.body) new ResizeObserver(report).observe(document.body);
+})();
+</script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 800px; height: 550px; overflow: hidden;
+      background: #f5f5f5;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      user-select: none;
+    }
+    canvas { display: block; }
+    #controls {
+      height: 110px; padding: 6px 14px 8px;
+      display: flex; flex-direction: column; justify-content: space-around;
+      font-size: 12px; color: #334;
+    }
+    .row { display: flex; align-items: center; gap: 8px; }
+    .row .lbl { color: #556; }
+    input[type=range] { width: 136px; accent-color: #5b84c4; }
+    select, button {
+      font-family: inherit; font-size: 12px; color: #334;
+      background: #fff; border: 1px solid #b8c2cf; border-radius: 5px;
+      padding: 2px 8px; cursor: pointer;
+    }
+    button.on { background: #dbe7fa; border-color: #7b9fd4; }
+    button:active { background: #cdd9ec; }
+    .ro { display: inline-block; color: #225; }
+    #wlRo { width: 122px; } #inRo { width: 36px; } #vRo { width: 58px; }
+    .spacer { flex: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c" width="800" height="440"></canvas>
+  <div id="controls">
+    <div class="row">
+      <span class="lbl">Metal:</span>
+      <select id="metal">
+        <option value="sodium">Sodium (W = 2.28 eV)</option>
+        <option value="calcium">Calcium (W = 2.87 eV)</option>
+        <option value="zinc">Zinc (W = 4.31 eV)</option>
+        <option value="copper">Copper (W = 4.70 eV)</option>
+        <option value="platinum">Platinum (W = 6.35 eV)</option>
+      </select>
+      <span class="lbl" style="margin-left:10px">Wavelength:</span>
+      <input type="range" id="wl" min="100" max="800" step="1" value="400">
+      <span class="ro" id="wlRo"></span>
+      <span class="lbl">Intensity:</span>
+      <input type="range" id="inten" min="0" max="100" step="1" value="50">
+      <span class="ro" id="inRo"></span>
+    </div>
+    <div class="row">
+      <span class="lbl">Battery voltage:</span>
+      <input type="range" id="volt" min="-8" max="8" step="0.05" value="0">
+      <span class="ro" id="vRo"></span>
+      <span class="lbl" style="margin-left:10px">Graph:</span>
+      <button id="gNone" class="on">None</button>
+      <button id="gIV">I vs V</button>
+      <button id="gII">I vs intensity</button>
+      <button id="gKF">KE vs f</button>
+      <span class="spacer"></span>
+      <button id="reset" title="Reset">&#8634; Reset</button>
+    </div>
+  </div>
+  <script>
+  (() => {
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    const W = 800, H = 440;
+
+    // ── Physics constants ───────────────────────────────────
+    const HC = 1239.84;        // eV·nm  (photon energy E = HC / lambda)
+    const HF14 = 0.413567;     // eV per 10^14 Hz (Planck's constant)
+    const C_NM = 2997.924;     // f(10^14 Hz) = C_NM / lambda(nm)
+    const METALS = {
+      sodium:   { name: 'Sodium',   W: 2.28 },
+      zinc:     { name: 'Zinc',     W: 4.31 },
+      copper:   { name: 'Copper',   W: 4.70 },
+      platinum: { name: 'Platinum', W: 6.35 },
+      calcium:  { name: 'Calcium',  W: 2.87 },
+    };
+    const I_FULL = 10;         // saturation current (uA) at 100% intensity
+
+    // ── Layout ──────────────────────────────────────────────
+    const TUBE  = { x: 60, y: 130, w: 410, h: 185, r: 42 };  // glass envelope
+    const CATH  = { x: 96,  w: 16, y0: 152, y1: 292 };       // target plate
+    const ANOD  = { x: 428, w: 8,  y0: 168, y1: 276 };       // collector
+    const GAP   = ANOD.x - (CATH.x + CATH.w);                // 316 px
+    const LAMP  = { x: 330, y: 55 };
+    const AMM   = { x: 200, y: 375, r: 19 };
+    const BATT  = { x: 300, y: 375 };
+    const GRAPH = { x: 500, y: 36, w: 292, h: 384 };
+    const VSCALE = 130;        // px/s per sqrt(eV):  v = VSCALE*sqrt(KE)
+    const ACOEF  = (VSCALE * VSCALE / 2) / GAP;  // px/s^2 per volt
+
+    // ── URL params / state ──────────────────────────────────
+    const qp = new URLSearchParams(location.search);
+    const num = (key, dflt, lo, hi) => {
+      const x = parseFloat(qp.get(key));
+      return Math.min(hi, Math.max(lo, isNaN(x) ? dflt : x));
+    };
+    const mKey = (qp.get('metal') || '').toLowerCase();
+    const init = {
+      metal: METALS[mKey] ? mKey : 'sodium',
+      nm: num('nm', 400, 100, 800),
+      v:  num('v', 0, -8, 8),
+      i:  num('i', 50, 0, 100),
+    };
+
+    const elMetal = document.getElementById('metal');
+    const elWl = document.getElementById('wl');
+    const elIn = document.getElementById('inten');
+    const elV  = document.getElementById('volt');
+    const elWlRo = document.getElementById('wlRo');
+    const elInRo = document.getElementById('inRo');
+    const elVRo  = document.getElementById('vRo');
+    const gBtns = { none: document.getElementById('gNone'),
+                    iv:   document.getElementById('gIV'),
+                    ii:   document.getElementById('gII'),
+                    kf:   document.getElementById('gKF') };
+
+    let graphMode = 'none';
+    let electrons = [];        // {x,y,vx,vy}
+    let emitAcc = 0, emitN = 0;
+    let needleI = 0;           // smoothed ammeter value
+
+    function applyInit() {
+      elMetal.value = init.metal;
+      elWl.value = init.nm;
+      elIn.value = init.i;
+      elV.value = init.v;
+      electrons = []; emitAcc = 0; emitN = 0; needleI = 0;
+      graphMode = 'none';
+      for (const k in gBtns) gBtns[k].classList.toggle('on', k === 'none');
+    }
+    applyInit();
+
+    for (const [k, btn] of Object.entries(gBtns)) {
+      btn.addEventListener('click', () => {
+        graphMode = k;
+        for (const k2 in gBtns) gBtns[k2].classList.toggle('on', k2 === k);
+      });
+    }
+    document.getElementById('reset').addEventListener('click', applyInit);
+
+    // ── Derived quantities ──────────────────────────────────
+    function readState() {
+      const metal = METALS[elMetal.value];
+      const nm = parseFloat(elWl.value);
+      const inten = parseFloat(elIn.value);
+      const V = parseFloat(elV.value);
+      const Eph = HC / nm;
+      const KEmax = Eph - metal.W;             // eV (may be <= 0)
+      const Vs = Math.max(0, KEmax);           // stopping voltage magnitude
+      return { metal, nm, inten, V, Eph, KEmax, Vs };
+    }
+    // current (uA) for arbitrary settings — also used by the graphs
+    function currentOf(nm, Wf, inten, V) {
+      const KE = HC / nm - Wf;
+      if (KE <= 0 || inten <= 0) return 0;
+      const frac = V >= 0 ? 1 : Math.max(0, 1 + V / KE);
+      return I_FULL * (inten / 100) * frac;
+    }
+
+    // ── Wavelength → color ──────────────────────────────────
+    function waveColor(nm) {
+      if (nm < 380) return { r: 138, g: 108, b: 214, band: 'ultraviolet' };
+      if (nm > 750) return { r: 158, g: 62, b: 48, band: 'infrared' };
+      let r = 0, g = 0, b = 0, br = 1;
+      if (nm < 440)      { r = (440 - nm) / 60;  b = 1; }
+      else if (nm < 490) { g = (nm - 440) / 50;  b = 1; }
+      else if (nm < 510) { g = 1; b = (510 - nm) / 20; }
+      else if (nm < 580) { r = (nm - 510) / 70;  g = 1; }
+      else if (nm < 645) { r = 1; g = (645 - nm) / 65; }
+      else               { r = 1; }
+      if (nm > 700) br = 0.35 + 0.65 * (750 - nm) / 50;
+      else if (nm < 420) br = 0.35 + 0.65 * (nm - 380) / 40;
+      const f = v => Math.round(255 * Math.pow(v * br, 0.8));
+      return { r: f(r), g: f(g), b: f(b), band: null };
+    }
+    const rgba = (c, a) => `rgba(${c.r},${c.g},${c.b},${a})`;
+    const darker = c => `rgb(${Math.round(c.r*0.62)},${Math.round(c.g*0.62)},${Math.round(c.b*0.62)})`;
+
+    // ── Electron stepping ───────────────────────────────────
+    const frac1 = x => x - Math.floor(x);
+    function stepElectrons(s, dt) {
+      // deterministic emission: rate proportional to intensity
+      const rate = (s.KEmax > 0) ? s.inten * 0.3 : 0;   // electrons / s
+      emitAcc += rate * dt;
+      while (emitAcc >= 1) {
+        emitAcc -= 1;
+        if (electrons.length < 140) {
+          emitN++;
+          const u = 0.08 + 0.92 * frac1(emitN * 0.6180339887); // KE fraction
+          const KE = s.KEmax * u;
+          electrons.push({
+            x: CATH.x + CATH.w + 2,
+            y: CATH.y0 + 8 + frac1(emitN * 0.3819660113) * (CATH.y1 - CATH.y0 - 16),
+            vx: VSCALE * Math.sqrt(KE),
+            vy: 14 * Math.sin(emitN * 1.7),
+          });
+        }
+      }
+      const ax = ACOEF * s.V;
+      for (let i = electrons.length - 1; i >= 0; i--) {
+        const e = electrons[i];
+        e.vx += ax * dt;
+        e.x += e.vx * dt;
+        e.y += e.vy * dt;
+        if (e.y < TUBE.y + 16) { e.y = TUBE.y + 16; e.vy = Math.abs(e.vy); }
+        if (e.y > TUBE.y + TUBE.h - 16) { e.y = TUBE.y + TUBE.h - 16; e.vy = -Math.abs(e.vy); }
+        if (e.x >= ANOD.x || e.x < CATH.x + CATH.w - 2) electrons.splice(i, 1);
+      }
+    }
+
+    // ── Drawing: scene ──────────────────────────────────────
+    function rrect(x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + w, y, x + w, y + h, r);
+      ctx.arcTo(x + w, y + h, x, y + h, r);
+      ctx.arcTo(x, y + h, x, y, r);
+      ctx.arcTo(x, y, x + w, y, r);
+      ctx.closePath();
+    }
+
+    function drawScene(s, col) {
+      // Title + hint
+      ctx.fillStyle = '#445'; ctx.font = 'bold 15px Segoe UI'; ctx.textAlign = 'left';
+      ctx.fillText('Photoelectric Effect', 14, 24);
+      ctx.fillStyle = '#99a5b2'; ctx.font = '11.5px Segoe UI';
+      ctx.fillText('Photons eject electrons when hf > W', 14, 42);
+
+      // Glass tube
+      rrect(TUBE.x, TUBE.y, TUBE.w, TUBE.h, TUBE.r);
+      ctx.fillStyle = 'rgba(214,232,246,0.55)'; ctx.fill();
+      ctx.strokeStyle = 'rgba(120,150,180,0.85)'; ctx.lineWidth = 2; ctx.stroke();
+      // glass highlight
+      rrect(TUBE.x + 8, TUBE.y + 6, TUBE.w - 16, 14, 8);
+      ctx.fillStyle = 'rgba(255,255,255,0.45)'; ctx.fill();
+
+      // Beam (lamp → cathode face)
+      const aim = Math.atan2((CATH.y0 + CATH.y1) / 2 - LAMP.y, CATH.x + CATH.w - LAMP.x);
+      const px = Math.cos(aim + Math.PI / 2) * 13, py = Math.sin(aim + Math.PI / 2) * 13;
+      const mx = LAMP.x + Math.cos(aim) * 30, my = LAMP.y + Math.sin(aim) * 30;
+      if (s.inten > 0) {
+        const a = (0.10 + 0.55 * s.inten / 100) * (col.band ? 0.55 : 1);
+        ctx.beginPath();
+        ctx.moveTo(mx - px, my - py); ctx.lineTo(mx + px, my + py);
+        ctx.lineTo(CATH.x + CATH.w + 2, CATH.y1 - 4);
+        ctx.lineTo(CATH.x + CATH.w + 2, CATH.y0 + 4);
+        ctx.closePath();
+        ctx.fillStyle = rgba(col, a); ctx.fill();
+        if (col.band) {  // mark invisible bands with a dashed outline
+          ctx.save(); ctx.setLineDash([6, 5]);
+          ctx.strokeStyle = rgba(col, 0.8); ctx.lineWidth = 1.2; ctx.stroke();
+          ctx.restore();
+        }
+      }
+
+      // Lamp housing (drawn over beam)
+      ctx.save();
+      ctx.translate(LAMP.x, LAMP.y); ctx.rotate(aim);
+      ctx.fillStyle = '#5d6570';
+      rrectAt(-34, -17, 56, 34, 8); ctx.fill();
+      ctx.fillStyle = '#454c55';
+      rrectAt(18, -14, 14, 28, 3); ctx.fill();
+      ctx.fillStyle = '#aab2bb'; ctx.beginPath();
+      ctx.arc(-22, 0, 7, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+      function rrectAt(x, y, w, h, r) { rrect(x, y, w, h, r); }
+      ctx.fillStyle = '#667'; ctx.font = '11px Segoe UI'; ctx.textAlign = 'center';
+      ctx.fillText('light source', LAMP.x - 62, LAMP.y - 18);
+
+      // Light readout (top-left block, clear of the graph panel)
+      ctx.textAlign = 'left'; ctx.font = 'bold 12px Segoe UI';
+      ctx.fillStyle = darker(col);
+      const bandTxt = col.band ? ' (' + col.band + ')' : '';
+      ctx.fillText(`λ = ${s.nm.toFixed(0)} nm${bandTxt}`, 14, 66);
+      ctx.font = '12px Segoe UI'; ctx.fillStyle = '#445';
+      ctx.fillText(`photon energy E = ${s.Eph.toFixed(2)} eV`, 14, 83);
+      ctx.fillStyle = s.KEmax > 0 ? '#2c7a2c' : '#b04848';
+      ctx.fillText(s.KEmax > 0 ? `KEₘₐₓ = E − W = ${s.KEmax.toFixed(2)} eV`
+                               : `E ≤ W : no electrons ejected`,
+                   14, 100);
+
+      // Cathode (target metal)
+      const cg = ctx.createLinearGradient(CATH.x, 0, CATH.x + CATH.w, 0);
+      cg.addColorStop(0, '#9aa0aa'); cg.addColorStop(0.5, '#ccd1d9'); cg.addColorStop(1, '#878d98');
+      ctx.fillStyle = cg;
+      ctx.fillRect(CATH.x, CATH.y0, CATH.w, CATH.y1 - CATH.y0);
+      ctx.strokeStyle = '#666c77'; ctx.lineWidth = 1;
+      ctx.strokeRect(CATH.x, CATH.y0, CATH.w, CATH.y1 - CATH.y0);
+      ctx.fillStyle = '#445'; ctx.font = 'bold 12px Segoe UI'; ctx.textAlign = 'center';
+      ctx.fillText(s.metal.name, CATH.x + CATH.w / 2 + 4, TUBE.y + TUBE.h + 18);
+      ctx.font = '11.5px Segoe UI'; ctx.fillStyle = '#667';
+      ctx.fillText(`W = ${s.metal.W.toFixed(2)} eV`, CATH.x + CATH.w / 2 + 4, TUBE.y + TUBE.h + 33);
+
+      // Anode (collector)
+      ctx.fillStyle = '#8d939e';
+      ctx.fillRect(ANOD.x, ANOD.y0, ANOD.w, ANOD.y1 - ANOD.y0);
+      ctx.strokeStyle = '#666c77'; ctx.strokeRect(ANOD.x, ANOD.y0, ANOD.w, ANOD.y1 - ANOD.y0);
+      ctx.fillStyle = '#667'; ctx.font = '11.5px Segoe UI';
+      ctx.fillText('collector', ANOD.x + ANOD.w / 2, TUBE.y + TUBE.h + 18);
+
+      // Electrons
+      ctx.fillStyle = '#2b4fc0';
+      for (const e of electrons) {
+        ctx.beginPath(); ctx.arc(e.x, e.y, 3, 0, Math.PI * 2); ctx.fill();
+      }
+
+      // Wires
+      ctx.strokeStyle = '#556'; ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(CATH.x + CATH.w / 2, CATH.y1);
+      ctx.lineTo(CATH.x + CATH.w / 2, AMM.y);
+      ctx.lineTo(AMM.x - AMM.r, AMM.y);
+      ctx.moveTo(AMM.x + AMM.r, AMM.y);
+      ctx.lineTo(BATT.x - 14, AMM.y);
+      ctx.moveTo(BATT.x + 14, AMM.y);
+      ctx.lineTo(ANOD.x + ANOD.w / 2, AMM.y);
+      ctx.lineTo(ANOD.x + ANOD.w / 2, ANOD.y1);
+      ctx.stroke();
+
+      // Ammeter
+      ctx.beginPath(); ctx.arc(AMM.x, AMM.y, AMM.r, 0, Math.PI * 2);
+      ctx.fillStyle = '#fff'; ctx.fill();
+      ctx.strokeStyle = '#778'; ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.fillStyle = '#778'; ctx.font = 'bold 10px Segoe UI'; ctx.textAlign = 'center';
+      ctx.fillText('µA', AMM.x, AMM.y + 13);
+      const na = (-55 + 110 * Math.min(1, needleI / I_FULL)) * Math.PI / 180;
+      ctx.beginPath();
+      ctx.moveTo(AMM.x, AMM.y + 4);
+      ctx.lineTo(AMM.x + 14 * Math.sin(na), AMM.y + 4 - 14 * Math.cos(na));
+      ctx.strokeStyle = '#c0392b'; ctx.lineWidth = 2; ctx.stroke();
+      ctx.fillStyle = '#225'; ctx.font = 'bold 12.5px Segoe UI';
+      ctx.fillText(`I = ${s.I.toFixed(2)} µA`, AMM.x, AMM.y - 27);
+
+      // Battery
+      ctx.fillStyle = '#f5f5f5';
+      ctx.fillRect(BATT.x - 14, AMM.y - 16, 28, 32);
+      ctx.strokeStyle = '#556'; ctx.lineWidth = 2.5;
+      ctx.beginPath();   // long plate (left) and short plate (right)
+      ctx.moveTo(BATT.x - 6, AMM.y - 14); ctx.lineTo(BATT.x - 6, AMM.y + 14);
+      ctx.moveTo(BATT.x + 6, AMM.y - 7);  ctx.lineTo(BATT.x + 6, AMM.y + 7);
+      ctx.stroke();
+      if (Math.abs(s.V) > 0.025) {
+        ctx.font = 'bold 13px Segoe UI';
+        ctx.fillStyle = '#c0392b';
+        ctx.fillText(s.V > 0 ? '+' : '−', BATT.x + 22, AMM.y - 8);
+        ctx.fillStyle = '#447';
+        ctx.fillText(s.V > 0 ? '−' : '+', BATT.x - 22, AMM.y - 8);
+      }
+      ctx.fillStyle = '#445'; ctx.font = '12px Segoe UI';
+      ctx.fillText(`ΔV = ${(s.V >= 0 ? '+' : '−')}${Math.abs(s.V).toFixed(2)} V`, BATT.x, AMM.y + 32);
+      if (s.V < 0) {
+        ctx.fillStyle = '#99a5b2'; ctx.font = '10.5px Segoe UI';
+        ctx.fillText('(retarding)', BATT.x, AMM.y + 46);
+      }
+    }
+
+    // ── Drawing: graphs ─────────────────────────────────────
+    function axes(title, xlab, ylab, xmax, ymax, xmin) {
+      xmin = xmin || 0;
+      const L = GRAPH.x + 44, R = GRAPH.x + GRAPH.w - 14;
+      const T = GRAPH.y + 40, B = GRAPH.y + GRAPH.h - 44;
+      rrect(GRAPH.x, GRAPH.y, GRAPH.w, GRAPH.h, 8);
+      ctx.fillStyle = '#fff'; ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.12)'; ctx.lineWidth = 1; ctx.stroke();
+      ctx.fillStyle = '#445'; ctx.font = 'bold 12.5px Segoe UI'; ctx.textAlign = 'center';
+      ctx.fillText(title, GRAPH.x + GRAPH.w / 2, GRAPH.y + 22);
+      ctx.strokeStyle = '#99a'; ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(L, T - 6); ctx.lineTo(L, B); ctx.lineTo(R, B); ctx.stroke();
+      ctx.fillStyle = '#667'; ctx.font = '11px Segoe UI';
+      ctx.fillText(xlab, (L + R) / 2, B + 30);
+      ctx.save();
+      ctx.translate(GRAPH.x + 13, (T + B) / 2); ctx.rotate(-Math.PI / 2);
+      ctx.fillText(ylab, 0, 0); ctx.restore();
+      const xp = v => L + (v - xmin) / (xmax - xmin) * (R - L);
+      const yp = v => B - v / ymax * (B - T);
+      // ticks
+      ctx.font = '10px Segoe UI'; ctx.textAlign = 'center'; ctx.fillStyle = '#778';
+      const nx = 4;
+      for (let i = 0; i <= nx; i++) {
+        const v = xmin + (xmax - xmin) * i / nx;
+        ctx.beginPath(); ctx.moveTo(xp(v), B); ctx.lineTo(xp(v), B + 4);
+        ctx.strokeStyle = '#99a'; ctx.stroke();
+        ctx.fillText((+v.toFixed(1)).toString(), xp(v), B + 15);
+      }
+      ctx.textAlign = 'right';
+      for (let i = 1; i <= 2; i++) {
+        const v = ymax * i / 2;
+        ctx.beginPath(); ctx.moveTo(L - 4, yp(v)); ctx.lineTo(L, yp(v)); ctx.stroke();
+        ctx.fillText((+v.toFixed(1)).toString(), L - 6, yp(v) + 3);
+      }
+      return { xp, yp, L, R, T, B };
+    }
+
+    function marker(x, y) {
+      ctx.beginPath(); ctx.arc(x, y, 4.5, 0, Math.PI * 2);
+      ctx.fillStyle = '#e67e22'; ctx.fill();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+    }
+
+    function drawGraph(s) {
+      if (graphMode === 'none') {
+        rrect(GRAPH.x, GRAPH.y, GRAPH.w, GRAPH.h, 8);
+        ctx.fillStyle = 'rgba(255,255,255,0.55)'; ctx.fill();
+        ctx.strokeStyle = 'rgba(0,0,0,0.08)'; ctx.lineWidth = 1; ctx.stroke();
+        ctx.fillStyle = '#aab6c2'; ctx.font = '12px Segoe UI'; ctx.textAlign = 'center';
+        ctx.fillText('Choose a graph below', GRAPH.x + GRAPH.w / 2, GRAPH.y + GRAPH.h / 2);
+        return;
+      }
+      if (graphMode === 'iv') {
+        const g = axes('Current vs. battery voltage', 'battery voltage (V)', 'current (µA)', 8, I_FULL * 1.05, -8);
+        if (s.Vs > 0 && s.Vs <= 8) {  // stopping-voltage guide
+          ctx.save(); ctx.setLineDash([4, 4]);
+          ctx.strokeStyle = '#b04848'; ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(g.xp(-s.Vs), g.T); ctx.lineTo(g.xp(-s.Vs), g.B); ctx.stroke();
+          ctx.restore();
+          ctx.fillStyle = '#b04848'; ctx.font = '10.5px Segoe UI'; ctx.textAlign = 'center';
+          ctx.fillText('−V₀', g.xp(-s.Vs), g.T - 4);
+        }
+        ctx.beginPath(); ctx.strokeStyle = '#2b6cb0'; ctx.lineWidth = 2;
+        let first = true;
+        for (let v = -8; v <= 8.001; v += 0.05) {
+          const y = g.yp(currentOf(s.nm, s.metal.W, s.inten, v));
+          first ? ctx.moveTo(g.xp(v), y) : ctx.lineTo(g.xp(v), y); first = false;
+        }
+        ctx.stroke();
+        marker(g.xp(s.V), g.yp(s.I));
+      } else if (graphMode === 'ii') {
+        const g = axes('Current vs. intensity', 'intensity (%)', 'current (µA)', 100, I_FULL * 1.05);
+        ctx.beginPath(); ctx.strokeStyle = '#2b6cb0'; ctx.lineWidth = 2;
+        ctx.moveTo(g.xp(0), g.yp(0));
+        ctx.lineTo(g.xp(100), g.yp(currentOf(s.nm, s.metal.W, 100, s.V)));
+        ctx.stroke();
+        marker(g.xp(s.inten), g.yp(s.I));
+      } else if (graphMode === 'kf') {
+        const g = axes('Max electron KE vs. frequency', 'frequency (10¹⁴ Hz)', 'KEₘₐₓ (eV)', 30, 11);
+        const f0 = s.metal.W / HF14;
+        ctx.beginPath(); ctx.strokeStyle = '#2b6cb0'; ctx.lineWidth = 2;
+        ctx.moveTo(g.xp(0), g.yp(0)); ctx.lineTo(g.xp(f0), g.yp(0));
+        ctx.lineTo(g.xp(30), g.yp(Math.min(11, HF14 * 30 - s.metal.W)));
+        ctx.stroke();
+        ctx.fillStyle = '#667'; ctx.font = '10.5px Segoe UI'; ctx.textAlign = 'center';
+        ctx.fillText('f₀', g.xp(f0), g.B - 6);
+        ctx.fillStyle = '#99a5b2'; ctx.font = '10.5px Segoe UI'; ctx.textAlign = 'left';
+        ctx.fillText('slope = h', g.xp(Math.min(27, f0 + 8)) , g.yp(Math.min(9.5, HF14 * (f0 + 8) - s.metal.W + 1.4)));
+        const fcur = C_NM / s.nm;
+        marker(g.xp(fcur), g.yp(Math.max(0, s.KEmax)));
+      }
+    }
+
+    // ── Main loop ───────────────────────────────────────────
+    let lastTs = null;
+    function frame(ts) {
+      if (lastTs === null) lastTs = ts;
+      const dt = Math.min((ts - lastTs) / 1000, 0.05);
+      lastTs = ts;
+
+      const s = readState();
+      s.I = currentOf(s.nm, s.metal.W, s.inten, s.V);
+      const col = waveColor(s.nm);
+
+      stepElectrons(s, dt);
+      needleI += (s.I - needleI) * Math.min(1, dt / 0.15);
+
+      // control readouts
+      elWlRo.textContent = `${s.nm.toFixed(0)} nm (${s.Eph.toFixed(2)} eV)`;
+      elInRo.textContent = `${s.inten.toFixed(0)}%`;
+      elVRo.textContent = `${s.V >= 0 ? '+' : '−'}${Math.abs(s.V).toFixed(2)} V`;
+
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = '#f5f5f5'; ctx.fillRect(0, 0, W, H);
+      drawScene(s, col);
+      drawGraph(s);
+
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  })();
+  </script>
+</body>
+</html>

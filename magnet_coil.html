@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Faraday Induction — Magnet and Coil</title>
+  <!-- Original AoPS interactive. Replaces the third-party "Magnets and Electromagnets" / "Faraday's Electromagnetic Lab" simulation. -->
+<script>
+// EigenNode auto-height v2.4
+(function() {
+  // 4px buffer for subpixel rounding + parent's >=3px noise threshold.
+  // Extra 18px when horizontal overflow forces a scrollbar (eats vertical
+  // space inside the iframe — AoPS classroom embeds in a narrower column
+  // than the 600px content, so a horizontal scrollbar appears and steals
+  // ~10-17px of height). Without this, the iframe ends up ~11-15px short.
+  var BUFFER = 4;
+  var H_SCROLLBAR = 18;
+  var measuring = false;
+  function measure() {
+    if (measuring) return 0;
+    var b = document.body, h = document.documentElement;
+    if (!b) return 0;
+    measuring = true;
+    // Temporarily neutralise body's height/min-height (overriding stylesheet
+    // rules with !important) so scrollHeight reflects actual content extent.
+    // Without this, patterns like body { height: 100vh } cause scrollHeight
+    // to echo the iframe's current viewport — adding BUFFER each cycle
+    // ratchets the iframe taller forever. Browser doesn't paint until this
+    // synchronous block returns, so no visible flicker.
+    var hOld = b.style.height, hPri = b.style.getPropertyPriority('height');
+    var mOld = b.style.minHeight, mPri = b.style.getPropertyPriority('min-height');
+    b.style.setProperty('height', 'auto', 'important');
+    b.style.setProperty('min-height', '0', 'important');
+    var content = b.scrollHeight || 0;
+    if (hOld) b.style.setProperty('height', hOld, hPri); else b.style.removeProperty('height');
+    if (mOld) b.style.setProperty('min-height', mOld, mPri); else b.style.removeProperty('min-height');
+    measuring = false;
+    // Check the documentElement only — that's the element that owns the
+    // iframe's horizontal scrollbar. Body can be narrower than the iframe
+    // (e.g. body{width:600px} centered in a 700px iframe) and have its own
+    // 1-2px overflow that doesn't actually trigger a scrollbar.
+    var hOverflow = h && (h.scrollWidth - h.clientWidth) >= 4;
+    return Math.ceil(content) + BUFFER + (hOverflow ? H_SCROLLBAR : 0);
+  }
+  var last = 0;
+  function report() {
+    var h = measure();
+    if (h > 0 && Math.abs(h - last) >= 2) {
+      last = h;
+      window.parent.postMessage({ type: 'resize', height: h }, '*');
+    }
+  }
+  window.addEventListener('load', report);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(report);
+  if (window.ResizeObserver && document.body) new ResizeObserver(report).observe(document.body);
+})();
+</script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 800px; height: 500px; overflow: hidden;
+      background: #f5f5f5;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      user-select: none;
+    }
+    canvas { display: block; touch-action: none; }
+    #controls {
+      height: 54px; padding: 0 12px;
+      display: flex; align-items: center; gap: 7px;
+      font-size: 12px; color: #334;
+    }
+    button {
+      font-family: inherit; font-size: 12px; color: #334;
+      background: #fff; border: 1px solid #b8c2cf; border-radius: 5px;
+      padding: 4px 9px; cursor: pointer; white-space: nowrap;
+    }
+    button.on { background: #dbe7fa; border-color: #7b9fd4; }
+    button:active { background: #cdd9ec; }
+    .sep { width: 1px; height: 26px; background: #ccd4dd; margin: 0 3px; }
+    .lbl { color: #556; }
+    input[type=range] { width: 86px; accent-color: #5b84c4; }
+    .spacer { flex: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c" width="800" height="446"></canvas>
+  <div id="controls">
+    <button id="mMag"  class="mode">Move magnet</button>
+    <button id="mCoil" class="mode">Move coil</button>
+    <button id="mComp" class="mode">Compass grid</button>
+    <button id="mElec" class="mode">Electron view</button>
+    <span class="sep"></span>
+    <button id="sweepBtn">&#9654; Auto sweep</button>
+    <button id="pauseBtn">&#10074;&#10074; Pause</button>
+    <span class="lbl">speed</span>
+    <input type="range" id="speed" min="1" max="6" step="1" value="4">
+    <span class="spacer"></span>
+    <button id="resetBtn" title="Reset">&#8634; Reset</button>
+  </div>
+  <script>
+  (() => {
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    const W = 800, H = 446;
+
+    // ── Geometry ────────────────────────────────────────────
+    const CY = 230;                 // coil axis height
+    const R = 80;                   // coil radius (px)
+    const NT = 4;                   // number of turns
+    const TPITCH = 13;              // x-advance per turn
+    const SLANT = 8;                // z-projection (oblique view)
+    const MAGW = 150, MAGH = 34;    // bar magnet size
+    const POLE = MAGW / 2 - 5;      // monopole offset from magnet center
+    const MX0 = 290, CX0 = 540;     // home positions (magnet center, coil center)
+    const SWEEP_A = 170;            // auto-sweep amplitude (px)
+
+    // ── Physics constants (tuned numerically) ───────────────
+    const SOFT2 = 196;              // pole softening (px^2) — keeps B finite
+    const GAIN = 0.041;             // galvanometer: defl = tanh(GAIN * emf)
+    const KDOT = 0.033;             // electron drift: rev/s per emf unit
+    const LOGB_LO = -5.7, LOGB_HI = -3.1;   // compass brightness range (log10 |B|)
+
+    // ── URL params ──────────────────────────────────────────
+    const qp = new URLSearchParams(location.search);
+    const MODES = ['move_magnet', 'move_coil', 'compass_grid', 'electron_dots'];
+    const num = (key, dflt, lo, hi) => {
+      const x = parseFloat(qp.get(key));
+      return Math.min(hi, Math.max(lo, isNaN(x) ? dflt : x));
+    };
+    const INDICATORS = ['bulb', 'galvo', 'both'];
+    const init = {
+      mode: MODES.includes(qp.get('mode')) ? qp.get('mode') : 'move_magnet',
+      sweep: qp.get('sweep') !== '0',
+      vsweep: qp.get('vsweep') === '1',   // magnet bobs vertically (up/down) instead of horizontally
+      offy: num('offy', 0, -150, 170),
+      offx: num('offx', 0, -200, 300),    // horizontal offset of the magnet's parked x (used when vsweep)
+      vamp: num('vamp', 90, 20, 200),     // vertical sweep amplitude (px), used when vsweep
+      coil: qp.get('coil') !== '0',
+      period: num('period', 3, 1, 6),
+      indicator: INDICATORS.includes(qp.get('indicator')) ? qp.get('indicator') : 'both',
+    };
+
+    // ── State ───────────────────────────────────────────────
+    let mode, sweepOn, running, tSweep, sf;
+    let mag = { x: MX0, y: CY };    // magnet center
+    let coilX = CX0;                // coil-unit center
+    let phiPrev = null, dphiS = 0;  // flux memory, smoothed dPhi/dt
+    let needle = 0;                 // galvanometer deflection, -1..1
+    let bulbB = 0;                  // bulb brightness, 0..1 (∝ |dΦ/dt|, soft threshold)
+    let pOff = 0, insetAng = 0;     // electron-dot phases
+    let dragging = null, dragDX = 0, dragDY = 0;
+    let hover = false;
+
+    const btns = {
+      move_magnet: document.getElementById('mMag'),
+      move_coil: document.getElementById('mCoil'),
+      compass_grid: document.getElementById('mComp'),
+      electron_dots: document.getElementById('mElec'),
+    };
+    const sweepBtn = document.getElementById('sweepBtn');
+    const pauseBtn = document.getElementById('pauseBtn');
+    const speedEl = document.getElementById('speed');
+
+    function setMode(m) {
+      mode = m;
+      for (const k of MODES) btns[k].classList.toggle('on', k === m);
+      // deterministic restart so captures are reproducible
+      mag.x = MX0 + init.offx; mag.y = CY + init.offy;
+      coilX = CX0;
+      tSweep = 0; sf = 0; phiPrev = null; dphiS = 0; needle = 0; bulbB = 0;
+      pOff = 0; insetAng = 0;
+    }
+    function setSweep(on) {
+      sweepOn = on;
+      sweepBtn.classList.toggle('on', on);
+    }
+    function setRunning(on) {
+      running = on;
+      pauseBtn.innerHTML = on ? '&#10074;&#10074; Pause' : '&#9654; Resume';
+    }
+    function applyInit() {
+      speedEl.value = Math.round(7 - init.period);
+      setMode(init.mode);
+      setSweep(init.sweep);
+      setRunning(true);
+    }
+    applyInit();
+
+    for (const k of MODES) {
+      btns[k].addEventListener('click', () => { setMode(k); });
+    }
+    sweepBtn.addEventListener('click', () => {
+      if (!sweepOn) {  // resume the sweep from the object's current offset
+        sf = (mode === 'move_coil') ? CX0 - coilX : (init.vsweep ? mag.y - (CY + init.offy) : mag.x - MX0);
+        tSweep = 0;
+      }
+      setSweep(!sweepOn);
+    });
+    pauseBtn.addEventListener('click', () => setRunning(!running));
+    document.getElementById('resetBtn').addEventListener('click', applyInit);
+
+    // ── Field & flux (two softened monopoles + magnetization) ──
+    function Bfield(px, py, pz, mx, my) {
+      let bx = 0, by = 0, bz = 0;
+      for (const s of [1, -1]) {
+        const dx = px - (mx + s * POLE), dy = py - my, dz = pz;
+        const r2 = dx * dx + dy * dy + dz * dz + SOFT2;
+        const f = s / (r2 * Math.sqrt(r2));
+        bx += f * dx; by += f * dy; bz += f * dz;
+      }
+      return [bx, by, bz];
+    }
+    // flux of one turn through the disk x = cx centered (cx, cy)
+    function flux(cx, cy, mx, my) {
+      const NR = 5, NA = 8;
+      let sum = 0;
+      for (let j = 0; j < NR; j++) {
+        const r = R * Math.sqrt((j + 0.5) / NR);
+        for (let k = 0; k < NA; k++) {
+          const a = 2 * Math.PI * (k + 0.5) / NA;
+          sum += Bfield(cx, cy + r * Math.cos(a), r * Math.sin(a), mx, my)[0];
+        }
+      }
+      let F = sum * Math.PI * R * R / (NR * NA);
+      // magnetization term: flux carried inside the bar when it threads the loop
+      const S = u => 0.5 * (1 + Math.tanh(u / 14));
+      F += 4 * Math.PI * S(mx + POLE - cx) * S(cx - (mx - POLE))
+                       * 0.5 * (1 + Math.tanh((R - Math.abs(my - cy)) / 20));
+      return F;
+    }
+
+    // ── Drawing helpers ─────────────────────────────────────
+    function rrect(x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + w, y, x + w, y + h, r);
+      ctx.arcTo(x + w, y + h, x, y + h, r);
+      ctx.arcTo(x, y + h, x, y, r);
+      ctx.arcTo(x, y, x + w, y, r);
+      ctx.closePath();
+    }
+    function arrowHead(x, y, ang, size, color) {
+      ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
+      ctx.beginPath();
+      ctx.moveTo(size, 0);
+      ctx.lineTo(-size * 0.6, -size * 0.62);
+      ctx.lineTo(-size * 0.6, size * 0.62);
+      ctx.closePath();
+      ctx.fillStyle = color; ctx.fill();
+      ctx.restore();
+    }
+
+    function drawMagnet(mx, my) {
+      const x0 = mx - MAGW / 2, y0 = my - MAGH / 2;
+      ctx.save();
+      rrect(x0, y0, MAGW, MAGH, 6); ctx.clip();
+      const gS = ctx.createLinearGradient(0, y0, 0, y0 + MAGH);
+      gS.addColorStop(0, '#6a8fd8'); gS.addColorStop(0.5, '#3f63b5'); gS.addColorStop(1, '#33508f');
+      ctx.fillStyle = gS; ctx.fillRect(x0, y0, MAGW / 2, MAGH);
+      const gN = ctx.createLinearGradient(0, y0, 0, y0 + MAGH);
+      gN.addColorStop(0, '#e07a6f'); gN.addColorStop(0.5, '#c43d35'); gN.addColorStop(1, '#9c2d27');
+      ctx.fillStyle = gN; ctx.fillRect(mx, y0, MAGW / 2, MAGH);
+      ctx.fillStyle = 'rgba(255,255,255,0.28)';
+      ctx.fillRect(x0, y0, MAGW, 7);
+      ctx.restore();
+      rrect(x0, y0, MAGW, MAGH, 6);
+      ctx.strokeStyle = '#39404a'; ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 16px Segoe UI'; ctx.textAlign = 'center';
+      ctx.fillText('S', mx - MAGW / 4, my + 6);
+      ctx.fillText('N', mx + MAGW / 4, my + 6);
+    }
+
+    // helix point for path-parameter p in [0, NT)
+    const helixUX = cx => cx - NT * TPITCH / 2;
+    function helixPt(cx, p) {
+      const th = 2 * Math.PI * p;
+      return [helixUX(cx) + TPITCH * p + SLANT * Math.sin(th),
+              CY - R * Math.cos(th),
+              Math.sin(th)];           // z-sign: + means front
+    }
+
+    function drawCoilHalf(cx, front) {
+      ctx.strokeStyle = front ? '#c98a4b' : '#96673a';
+      ctx.lineWidth = front ? 5 : 4.5;
+      ctx.lineCap = 'round';
+      const NSEG = 48 * NT;
+      let started = false;
+      ctx.beginPath();
+      for (let i = 0; i <= NSEG; i++) {
+        const p = NT * i / NSEG;
+        const [x, y, z] = helixPt(cx, Math.min(p, NT - 1e-6));
+        const onSide = front ? z > -0.02 : z < 0.02;  // tiny overlap hides seams
+        if (onSide) {
+          started ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+          started = true;
+        } else started = false;
+      }
+      ctx.stroke();
+    }
+
+    function drawDots(cx, front) {
+      const ND = 28;
+      for (let k = 0; k < ND; k++) {
+        const p = (((k * NT / ND + pOff) % NT) + NT) % NT;
+        const [x, y, z] = helixPt(cx, p);
+        if (front ? z <= 0 : z > 0) continue;
+        ctx.beginPath(); ctx.arc(x, y, 3.2, 0, Math.PI * 2);
+        ctx.fillStyle = front ? '#ffd34d' : '#cfa83c';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(90,70,10,0.75)'; ctx.lineWidth = 1; ctx.stroke();
+      }
+    }
+
+    // galvanometer meter at needle pivot (px, py), scale s
+    function drawMeter(px, py, s) {
+      rrect(px - 58 * s, py - 49 * s, 116 * s, 58 * s, 7 * s);
+      ctx.fillStyle = '#fff'; ctx.fill();
+      ctx.strokeStyle = '#99a3ae'; ctx.lineWidth = 1.5; ctx.stroke();
+      // dial arc + ticks
+      ctx.strokeStyle = '#b8c2cf'; ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(px, py, 41 * s, (-140) * Math.PI / 180, (-40) * Math.PI / 180);
+      ctx.stroke();
+      for (const a of [-50, -25, 0, 25, 50]) {
+        const sa = Math.sin(a * Math.PI / 180), ca = Math.cos(a * Math.PI / 180);
+        ctx.beginPath();
+        ctx.moveTo(px + 36 * s * sa, py - 36 * s * ca);
+        ctx.lineTo(px + (a === 0 ? 43 : 41) * s * sa, py - (a === 0 ? 43 : 41) * s * ca);
+        ctx.strokeStyle = a === 0 ? '#667' : '#b8c2cf';
+        ctx.lineWidth = a === 0 ? 1.5 : 1;
+        ctx.stroke();
+      }
+      ctx.fillStyle = '#667'; ctx.font = `bold ${Math.round(11 * s)}px Segoe UI`; ctx.textAlign = 'center';
+      ctx.fillText('0', px, py - 47 * s);
+      ctx.fillText('−', px - 42 * s, py - 18 * s);
+      ctx.fillText('+', px + 42 * s, py - 18 * s);
+      // needle
+      const na = needle * 50 * Math.PI / 180;
+      ctx.beginPath();
+      ctx.moveTo(px, py);
+      ctx.lineTo(px + 38 * s * Math.sin(na), py - 38 * s * Math.cos(na));
+      ctx.strokeStyle = '#c0392b'; ctx.lineWidth = 2.4 * s; ctx.stroke();
+      ctx.beginPath(); ctx.arc(px, py, 3 * s, 0, Math.PI * 2);
+      ctx.fillStyle = '#39404a'; ctx.fill();
+      ctx.fillStyle = '#9aa5b0'; ctx.font = `${(9.5 * s).toFixed(1)}px Segoe UI`;
+      ctx.fillText('galvanometer', px, py + 7 * s);
+    }
+
+    // light bulb, glass center (bx, by), lit by bulbB (0..1)
+    function drawBulb(bx, by) {
+      const b = bulbB;
+      if (b > 0.02) {                  // glow halo
+        const rg = 26 + 36 * b;
+        const g = ctx.createRadialGradient(bx, by, 4, bx, by, rg);
+        g.addColorStop(0, `rgba(255,219,105,${(0.8 * b).toFixed(3)})`);
+        g.addColorStop(1, 'rgba(255,219,105,0)');
+        ctx.beginPath(); ctx.arc(bx, by, rg, 0, Math.PI * 2);
+        ctx.fillStyle = g; ctx.fill();
+      }
+      // glass envelope
+      ctx.beginPath(); ctx.arc(bx, by, 16, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(237,243,248,0.94)'; ctx.fill();
+      if (b > 0.02) {
+        ctx.beginPath(); ctx.arc(bx, by, 16, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255,216,77,${(0.85 * b).toFixed(3)})`; ctx.fill();
+      }
+      ctx.beginPath(); ctx.arc(bx, by, 16, 0, Math.PI * 2);
+      ctx.strokeStyle = '#8893a0'; ctx.lineWidth = 1.5; ctx.stroke();
+      // filament supports + zigzag filament
+      ctx.lineCap = 'round'; ctx.lineWidth = 1.6;
+      ctx.strokeStyle = b > 0.02
+        ? `rgb(255, ${Math.round(160 + 95 * b)}, ${Math.round(60 + 170 * b)})`
+        : '#6b5b4a';
+      ctx.beginPath();
+      ctx.moveTo(bx - 5, by + 13); ctx.lineTo(bx - 4, by + 3);
+      ctx.lineTo(bx - 2, by + 8); ctx.lineTo(bx, by + 3);
+      ctx.lineTo(bx + 2, by + 8); ctx.lineTo(bx + 4, by + 3);
+      ctx.lineTo(bx + 5, by + 13);
+      ctx.stroke();
+      // neck + screw base
+      ctx.fillStyle = '#b9c2cc';
+      ctx.fillRect(bx - 7, by + 13, 14, 5);
+      rrect(bx - 7, by + 17, 14, 11, 2);
+      ctx.fillStyle = '#9aa5b1'; ctx.fill();
+      ctx.strokeStyle = '#7c8893'; ctx.lineWidth = 1;
+      for (const dy of [21, 24.5]) {
+        ctx.beginPath(); ctx.moveTo(bx - 6, by + dy); ctx.lineTo(bx + 6, by + dy); ctx.stroke();
+      }
+      ctx.fillStyle = '#9aa5b0'; ctx.font = '9.5px Segoe UI'; ctx.textAlign = 'left';
+      ctx.fillText('bulb', bx + 21, by + 2);
+      ctx.textAlign = 'center';
+    }
+
+    // circuit indicator(s) above/beside the coil, per ?indicator=bulb|galvo|both
+    function drawIndicators(cx) {
+      const ux = helixUX(cx), uxr = ux + NT * TPITCH;
+      ctx.lineCap = 'round';
+      if (init.indicator === 'galvo') {
+        // classic layout: meter mounted above the coil
+        ctx.strokeStyle = '#778'; ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        ctx.moveTo(ux, CY - R);  ctx.lineTo(cx - 18, 132); ctx.lineTo(cx - 18, 121);
+        ctx.moveTo(uxr, CY - R); ctx.lineTo(cx + 18, 132); ctx.lineTo(cx + 18, 121);
+        ctx.stroke();
+        drawMeter(cx, 112, 1);
+        return;
+      }
+      // bulb wired across the coil ends, mounted above the coil
+      ctx.strokeStyle = '#778'; ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      ctx.moveTo(ux, CY - R);  ctx.lineTo(cx - 5, 126);
+      ctx.moveTo(uxr, CY - R); ctx.lineTo(cx + 5, 126);
+      ctx.stroke();
+      if (init.indicator === 'both') {
+        // small galvanometer beside the bulb, wired across the same leads
+        const gx = cx - 118, gpy = 104, s = 0.78;
+        ctx.strokeStyle = '#8a93a0'; ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.moveTo(gx + 10, gpy + 8);  ctx.lineTo(gx + 10, 136); ctx.lineTo(cx - 14, 136.3);
+        ctx.moveTo(gx - 10, gpy + 8);  ctx.lineTo(gx - 10, 143); ctx.lineTo(cx + 16, 143);
+        ctx.lineTo(cx + 16, 138.6);
+        ctx.stroke();
+        for (const [jx, jy] of [[cx - 14, 136.3], [cx + 16, 138.6]]) {
+          ctx.beginPath(); ctx.arc(jx, jy, 2.1, 0, Math.PI * 2);
+          ctx.fillStyle = '#778'; ctx.fill();
+        }
+        drawMeter(gx, gpy, s);
+      }
+      drawBulb(cx, 92);
+    }
+
+    function drawCompasses() {
+      for (let gx = 23; gx < W; gx += 46) {
+        for (let gy = 23; gy < H - 8; gy += 46) {
+          const dx = gx - mag.x, dy = gy - mag.y;
+          if (Math.abs(dx) < 92 && Math.abs(dy) < 32) continue;  // under the bar
+          const [bx, by] = Bfield(gx, gy, 0, mag.x, mag.y);
+          const bm = Math.hypot(bx, by);
+          if (bm <= 0) continue;
+          const t = Math.min(1, Math.max(0,
+            (Math.log10(bm) - LOGB_LO) / (LOGB_HI - LOGB_LO)));
+          const a = 0.08 + 0.92 * t;
+          const ux = bx / bm, uy = by / bm, L = 6.5;
+          ctx.beginPath(); ctx.arc(gx, gy, 8, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(255,255,255,${0.55 * a})`; ctx.fill();
+          ctx.strokeStyle = `rgba(110,120,135,${0.6 * a})`; ctx.lineWidth = 1; ctx.stroke();
+          ctx.beginPath();           // needle: red end points along B
+          ctx.moveTo(gx, gy); ctx.lineTo(gx + ux * L, gy + uy * L);
+          ctx.strokeStyle = `rgba(200,52,44,${a})`; ctx.lineWidth = 2.2; ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(gx, gy); ctx.lineTo(gx - ux * L, gy - uy * L);
+          ctx.strokeStyle = `rgba(85,105,140,${a})`; ctx.lineWidth = 2.2; ctx.stroke();
+        }
+      }
+    }
+
+    function drawInset() {
+      const cx = 104, cy = 150, r = 52;
+      ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.strokeStyle = '#c98a4b'; ctx.lineWidth = 7; ctx.stroke();
+      for (let k = 0; k < 9; k++) {
+        const a = insetAng + k * 2 * Math.PI / 9;
+        ctx.beginPath();
+        ctx.arc(cx + r * Math.cos(a), cy + r * Math.sin(a), 3.2, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffd34d'; ctx.fill();
+        ctx.strokeStyle = 'rgba(90,70,10,0.75)'; ctx.lineWidth = 1; ctx.stroke();
+      }
+      if (Math.abs(needle) > 0.06) {
+        // conventional current arrow — opposite the electron dots
+        const ccw = dphiS > 0;       // CCW (seen from the N end) while N approaches
+        const rc = r - 16, a0 = Math.PI / 2 - 0.5, a1 = Math.PI / 2 + 0.5;
+        ctx.beginPath(); ctx.arc(cx, cy, rc, a0, a1);
+        ctx.strokeStyle = '#e67e22'; ctx.lineWidth = 2.5; ctx.stroke();
+        const ae = ccw ? a0 : a1;    // canvas angles grow clockwise, so CCW = decreasing angle
+        const tx = cx + rc * Math.cos(ae), ty = cy + rc * Math.sin(ae);
+        const tang = ae + (ccw ? -Math.PI / 2 : Math.PI / 2);
+        arrowHead(tx, ty, tang, 7, '#e67e22');
+        ctx.fillStyle = '#e67e22'; ctx.font = 'bold 12px Segoe UI'; ctx.textAlign = 'center';
+        ctx.fillText('I', cx, cy + rc - 8);
+      }
+      ctx.fillStyle = '#8895a3'; ctx.font = '10.5px Segoe UI'; ctx.textAlign = 'center';
+      ctx.fillText('the coil, seen from', cx, cy + r + 18);
+      ctx.fillText("the magnet's N end", cx, cy + r + 31);
+    }
+
+    function drawCurrentArrows(cx) {
+      if (Math.abs(needle) <= 0.06) return;
+      const along = dphiS > 0 ? 1 : -1;   // current runs along +θ while N approaches
+      for (const pf of [1.25, 2.25]) {
+        const [x, y] = helixPt(cx, pf);
+        const ang = Math.atan2(R * along, (TPITCH / (2 * Math.PI)) * along);
+        arrowHead(x, y, ang, 8, '#e67e22');
+      }
+    }
+
+    // ── Scene ───────────────────────────────────────────────
+    function draw() {
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = '#f5f5f5'; ctx.fillRect(0, 0, W, H);
+
+      if (mode === 'compass_grid') drawCompasses();
+
+      if (init.coil) {
+        drawCoilHalf(coilX, false);
+        drawDots(coilX, false);
+      }
+      drawMagnet(mag.x, mag.y);
+      if (init.coil) {
+        drawCoilHalf(coilX, true);
+        drawDots(coilX, true);
+        if (mode === 'electron_dots') drawCurrentArrows(coilX);
+        drawIndicators(coilX);
+      }
+
+      if (mode === 'electron_dots') drawInset();
+
+      // titles / legends / hints
+      ctx.fillStyle = '#445'; ctx.font = 'bold 15px Segoe UI'; ctx.textAlign = 'left';
+      ctx.fillText('Faraday Induction', 12, 22);
+      ctx.textAlign = 'right'; ctx.font = '11.5px Segoe UI';
+      if (mode === 'compass_grid') {
+        ctx.fillStyle = '#8895a3';
+        ctx.fillText('brighter compasses = stronger field', W - 12, 20);
+      } else if (mode === 'electron_dots') {
+        ctx.fillStyle = '#8895a3';
+        ctx.beginPath(); ctx.arc(W - 150, 16, 3.2, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffd34d'; ctx.fill();
+        ctx.strokeStyle = 'rgba(90,70,10,0.75)'; ctx.lineWidth = 1; ctx.stroke();
+        ctx.fillStyle = '#8895a3';
+        ctx.fillText('electrons (−)', W - 12, 20);
+        arrowHead(W - 150, 34, 0, 7, '#e67e22');
+        ctx.fillText('conventional current', W - 12, 38);
+      }
+      ctx.textAlign = 'center'; ctx.fillStyle = '#9aa5b0'; ctx.font = '11.5px Segoe UI';
+      const what = (mode === 'move_coil') ? 'coil' : 'magnet';
+      ctx.fillText(`Drag the ${what} — or press Auto sweep`, W / 2, H - 8);
+    }
+
+    // ── Physics step ────────────────────────────────────────
+    function step(dt) {
+      const period = 7 - parseFloat(speedEl.value);
+      if (sweepOn) {
+        tSweep += dt;
+        const amp = init.vsweep ? init.vamp : SWEEP_A;
+        const target = amp * Math.sin(2 * Math.PI * tSweep / period);
+        sf += (target - sf) * Math.min(1, 6 * dt);
+        const k = Math.min(1, 6 * dt);
+        if (mode === 'move_coil') {
+          coilX = CX0 - sf;
+          mag.x += (MX0 - mag.x) * k;
+          mag.y += (CY + init.offy - mag.y) * k;
+        } else if (init.vsweep) {
+          mag.y = CY + init.offy + sf;          // magnet moves straight up and down
+          mag.x += (MX0 + init.offx - mag.x) * k;
+          coilX += (CX0 - coilX) * k;
+        } else {
+          mag.x = MX0 + sf;
+          coilX += (CX0 - coilX) * k;
+          mag.y += (CY + init.offy - mag.y) * k;
+        }
+      }
+      const phi = flux(coilX, CY, mag.x, mag.y);
+      if (phiPrev !== null && dt > 0) {
+        const raw = (phi - phiPrev) / dt;
+        dphiS += (raw - dphiS) * Math.min(1, dt / 0.06);
+      }
+      phiPrev = phi;
+      const emf = NT * dphiS;
+      needle += (Math.tanh(GAIN * emf) - needle) * Math.min(1, dt / 0.08);
+      // bulb brightness ∝ |dΦ/dt|, with a soft turn-on threshold (dim trickles
+      // stay dark; a real sweep visibly lights it)
+      const drive = Math.abs(Math.tanh(GAIN * emf));
+      const u = Math.min(1, Math.max(0, (drive - 0.08) / 0.52));
+      bulbB += (u * u * (3 - 2 * u) - bulbB) * Math.min(1, dt / 0.09);
+      let rate = -KDOT * emf;                       // electron drift, rev/s
+      rate = Math.max(-1.3, Math.min(1.3, rate));
+      pOff = (((pOff + rate * dt) % NT) + NT) % NT;
+      insetAng -= 2 * Math.PI * rate * dt;          // CW on screen while N approaches
+    }
+
+    // ── Main loop ───────────────────────────────────────────
+    let lastTs = null;
+    function frameLoop(ts) {
+      if (lastTs === null) lastTs = ts;
+      const dt = Math.min((ts - lastTs) / 1000, 0.05);
+      lastTs = ts;
+      if (running) step(dt);
+      else phiPrev = flux(coilX, CY, mag.x, mag.y);  // no spike on resume
+      draw();
+      requestAnimationFrame(frameLoop);
+    }
+    requestAnimationFrame(frameLoop);
+
+    // ── Interaction (pointer events) ────────────────────────
+    const cpos = e => {
+      const r = canvas.getBoundingClientRect();
+      return [e.clientX - r.left, e.clientY - r.top];
+    };
+    const overMagnet = (x, y) =>
+      Math.abs(x - mag.x) < MAGW / 2 + 6 && Math.abs(y - mag.y) < MAGH / 2 + 8;
+    const overCoil = (x, y) =>
+      Math.abs(x - coilX) < 78 && y > 56 && y < CY + R + 10;
+
+    canvas.addEventListener('pointerdown', e => {
+      const [x, y] = cpos(e);
+      const wantCoil = (mode === 'move_coil') && init.coil;
+      if (wantCoil ? overCoil(x, y) : overMagnet(x, y)) {
+        dragging = wantCoil ? 'coil' : 'magnet';
+        dragDX = (wantCoil ? coilX : mag.x) - x;
+        dragDY = (wantCoil ? CY : mag.y) - y;
+        setSweep(false);
+        canvas.setPointerCapture(e.pointerId);
+      }
+    });
+    canvas.addEventListener('pointermove', e => {
+      const [x, y] = cpos(e);
+      if (dragging === 'magnet') {
+        mag.x = Math.max(80, Math.min(720, x + dragDX));
+        mag.y = Math.max(70, Math.min(410, y + dragDY));
+      } else if (dragging === 'coil') {
+        coilX = Math.max(340, Math.min(724, x + dragDX));
+      } else {
+        const wantCoil = (mode === 'move_coil') && init.coil;
+        hover = wantCoil ? overCoil(x, y) : overMagnet(x, y);
+      }
+      canvas.style.cursor = dragging ? 'grabbing' : (hover ? 'grab' : 'default');
+    });
+    const endDrag = () => { dragging = null; };
+    canvas.addEventListener('pointerup', endDrag);
+    canvas.addEventListener('pointercancel', endDrag);
+  })();
+  </script>
+</body>
+</html>

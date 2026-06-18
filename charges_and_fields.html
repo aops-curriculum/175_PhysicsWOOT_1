@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Charges and Fields</title>
+  <!-- Original AoPS interactive. Replaces the third-party "Charges and Fields" simulation. -->
+<script>
+// EigenNode auto-height v2.4
+(function() {
+  // 4px buffer for subpixel rounding + parent's >=3px noise threshold.
+  // Extra 18px when horizontal overflow forces a scrollbar (eats vertical
+  // space inside the iframe — AoPS classroom embeds in a narrower column
+  // than the 600px content, so a horizontal scrollbar appears and steals
+  // ~10-17px of height). Without this, the iframe ends up ~11-15px short.
+  var BUFFER = 4;
+  var H_SCROLLBAR = 18;
+  var measuring = false;
+  function measure() {
+    if (measuring) return 0;
+    var b = document.body, h = document.documentElement;
+    if (!b) return 0;
+    measuring = true;
+    // Temporarily neutralise body's height/min-height (overriding stylesheet
+    // rules with !important) so scrollHeight reflects actual content extent.
+    // Without this, patterns like body { height: 100vh } cause scrollHeight
+    // to echo the iframe's current viewport — adding BUFFER each cycle
+    // ratchets the iframe taller forever. Browser doesn't paint until this
+    // synchronous block returns, so no visible flicker.
+    var hOld = b.style.height, hPri = b.style.getPropertyPriority('height');
+    var mOld = b.style.minHeight, mPri = b.style.getPropertyPriority('min-height');
+    b.style.setProperty('height', 'auto', 'important');
+    b.style.setProperty('min-height', '0', 'important');
+    var content = b.scrollHeight || 0;
+    if (hOld) b.style.setProperty('height', hOld, hPri); else b.style.removeProperty('height');
+    if (mOld) b.style.setProperty('min-height', mOld, mPri); else b.style.removeProperty('min-height');
+    measuring = false;
+    // Check the documentElement only — that's the element that owns the
+    // iframe's horizontal scrollbar. Body can be narrower than the iframe
+    // (e.g. body{width:600px} centered in a 700px iframe) and have its own
+    // 1-2px overflow that doesn't actually trigger a scrollbar.
+    var hOverflow = h && (h.scrollWidth - h.clientWidth) >= 4;
+    return Math.ceil(content) + BUFFER + (hOverflow ? H_SCROLLBAR : 0);
+  }
+  var last = 0;
+  function report() {
+    var h = measure();
+    if (h > 0 && Math.abs(h - last) >= 2) {
+      last = h;
+      window.parent.postMessage({ type: 'resize', height: h }, '*');
+    }
+  }
+  window.addEventListener('load', report);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(report);
+  if (window.ResizeObserver && document.body) new ResizeObserver(report).observe(document.body);
+})();
+</script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 800px; height: 600px; overflow: hidden;
+      background: #0b0e14;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      user-select: none;
+    }
+    canvas { display: block; touch-action: none; }
+  </style>
+</head>
+<body>
+  <canvas id="c" width="800" height="600"></canvas>
+  <script>
+  (() => {
+    'use strict';
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+
+    // ── Geometry ─────────────────────────────────────────────
+    const W = 800, H = 600;
+    const TRAY_H = 70, PLAY_H = H - TRAY_H;          // play area: 800 x 530
+    const SCALE = 80;                                 // px per meter (1 m major grid)
+    const WORLD_W = W / SCALE;                        // 10 m
+    const WORLD_H = PLAY_H / SCALE;                   // 6.625 m
+
+    // HiDPI rendering (crisper screenshots; logical coords stay 800x600)
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    // world (m, y up, origin bottom-left of play area) <-> screen (px)
+    const sx = x => x * SCALE;
+    const sy = y => PLAY_H - y * SCALE;
+    const wx = px => px / SCALE;
+    const wy = py => (PLAY_H - py) / SCALE;
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+    // ── Physics ──────────────────────────────────────────────
+    const K = 8.99e9;            // Coulomb constant, N·m²/C²
+    const NC = 1e-9;             // 1 nC in coulombs
+    const KQ = K * NC;           // 8.99 — field of 1 nC: E = 8.99/r² V/m; V = 8.99/r V
+
+    let charges = [];            // {q (nC), x, y (m)}
+    let sensors = [];            // {x, y (m)}
+    let probe   = { x: 2.5, y: 3.5 };
+    let contours = [];           // {V, segs:[[x1,y1,x2,y2]...] (m), lx, ly}
+    let show = { field: true, dirOnly: false, probe: false, values: false, grid: true };
+
+    function fieldAt(x, y) {
+      let Ex = 0, Ey = 0;
+      for (const c of charges) {
+        const dx = x - c.x, dy = y - c.y;
+        let r2 = dx * dx + dy * dy;
+        if (r2 < 1e-6) r2 = 1e-6;
+        const f = KQ * c.q / (r2 * Math.sqrt(r2));
+        Ex += f * dx; Ey += f * dy;
+      }
+      return { Ex, Ey, E: Math.hypot(Ex, Ey) };
+    }
+
+    function potAt(x, y) {
+      let V = 0;
+      for (const c of charges) {
+        const dx = x - c.x, dy = y - c.y;
+        const r = Math.max(Math.sqrt(dx * dx + dy * dy), 1e-4);
+        V += KQ * c.q / r;
+      }
+      return V;
+    }
+
+    // Arrow length/brightness mapping: saturates near a charge, fades far away
+    const ESAT = 40;             // V/m at which arrows reach full brightness/length
+    const magFrac = E => Math.min(1, Math.pow(E / ESAT, 0.38));
+
+    // ── URL presets ──────────────────────────────────────────
+    // ?charges=+1@4,3;-1@6,3   q in nC ('+' optional / may arrive as space; %2B also fine)
+    // &sensors=4,2;6,2  &probe=5,3 (or probe=1)  &field=1  &dironly=1
+    // &values=1  &grid=0  &clean=1 (hide all UI chrome, for screenshots)
+    const qp = new URLSearchParams(location.search);
+    const boolParam = (name, def) => {
+      const v = qp.get(name);
+      if (v === null) return def;
+      return v === '1' || v === 'true';
+    };
+    const clean = boolParam('clean', false);
+
+    function parseCharges(s) {
+      const out = [];
+      if (!s) return out;
+      for (const part of s.split(';')) {
+        const m = part.trim().replace(/−/g, '-')
+          .match(/^([+-]?\s*\d*\.?\d+)\s*@\s*(-?\d*\.?\d+)\s*,\s*(-?\d*\.?\d+)$/);
+        if (!m) continue;
+        const q = parseFloat(m[1].replace(/\s+/g, ''));
+        if (!q) continue;
+        out.push({ q, x: parseFloat(m[2]), y: parseFloat(m[3]) });
+      }
+      return out;
+    }
+
+    function parsePoints(s) {
+      const out = [];
+      if (!s) return out;
+      for (const part of s.split(';')) {
+        const m = part.trim().match(/^(-?\d*\.?\d+)\s*,\s*(-?\d*\.?\d+)$/);
+        if (m) out.push({ x: parseFloat(m[1]), y: parseFloat(m[2]) });
+      }
+      return out;
+    }
+
+    const initial = {
+      charges: parseCharges(qp.get('charges')),
+      sensors: parsePoints(qp.get('sensors')),
+      probe: { x: 2.5, y: 3.5 },
+      show: {
+        field:   boolParam('field', true),
+        dirOnly: boolParam('dironly', false),
+        probe:   false,
+        values:  boolParam('values', false),
+        grid:    boolParam('grid', true),
+      },
+    };
+    {
+      const pv = qp.get('probe');
+      if (pv !== null && pv !== '0' && pv !== '') {
+        initial.show.probe = true;
+        const pt = parsePoints(pv);
+        if (pt.length) initial.probe = pt[0];
+      }
+    }
+
+    function doReset() {
+      charges = initial.charges.map(c => ({ ...c }));
+      sensors = initial.sensors.map(s => ({ ...s }));
+      probe = { ...initial.probe };
+      show = { ...initial.show };
+      contours = [];
+      drag = null;
+    }
+
+    // ── Equipotential (marching squares) ─────────────────────
+    function plotEquipotential() {
+      if (!charges.length) return;
+      const V0 = potAt(probe.x, probe.y);
+      if (!isFinite(V0)) return;
+      const step = 0.05;                       // 4 px sampling
+      const nx = Math.round(WORLD_W / step);   // 200
+      const ny = Math.ceil(WORLD_H / step);    // 133
+      const sw = nx + 1;
+      const vals = new Float64Array(sw * (ny + 1));
+      for (let j = 0; j <= ny; j++) {
+        const y = j * step;
+        for (let i = 0; i <= nx; i++) vals[j * sw + i] = potAt(i * step, y) - V0;
+      }
+      const segs = [];
+      for (let j = 0; j < ny; j++) {
+        for (let i = 0; i < nx; i++) {
+          const v00 = vals[j * sw + i],       v10 = vals[j * sw + i + 1];
+          const v01 = vals[(j + 1) * sw + i], v11 = vals[(j + 1) * sw + i + 1];
+          const b00 = v00 > 0, b10 = v10 > 0, b01 = v01 > 0, b11 = v11 > 0;
+          if (b00 === b10 && b10 === b11 && b11 === b01) continue;
+          const X = i * step, Y = j * step, e = {};
+          if (b00 !== b10) e.B = [X + step * (v00 / (v00 - v10)), Y];
+          if (b10 !== b11) e.R = [X + step, Y + step * (v10 / (v10 - v11))];
+          if (b01 !== b11) e.T = [X + step * (v01 / (v01 - v11)), Y + step];
+          if (b00 !== b01) e.L = [X, Y + step * (v00 / (v00 - v01))];
+          const keys = Object.keys(e);
+          if (keys.length === 2) {
+            const [p, q] = [e[keys[0]], e[keys[1]]];
+            segs.push([p[0], p[1], q[0], q[1]]);
+          } else if (keys.length === 4) {
+            // saddle: resolve with cell-center sign
+            const sameAsBL = ((v00 + v10 + v01 + v11) / 4 > 0) === b00;
+            const pairs = sameAsBL ? [['B', 'R'], ['T', 'L']] : [['B', 'L'], ['T', 'R']];
+            for (const [a, b] of pairs) segs.push([e[a][0], e[a][1], e[b][0], e[b][1]]);
+          }
+        }
+      }
+      if (segs.length) contours.push({ V: V0, segs, lx: probe.x, ly: probe.y });
+    }
+
+    // ── UI layout ────────────────────────────────────────────
+    const PANEL = { x: W - 192, y: 12, w: 180, h: 204 };
+    const rows = [
+      { key: 'field',   label: 'Electric field' },
+      { key: 'dirOnly', label: 'Direction only', indent: 18, needs: 'field' },
+      { key: 'probe',   label: 'Voltage probe' },
+      { key: 'values',  label: 'Values' },
+      { key: 'grid',    label: 'Grid' },
+    ];
+    const rowCy = i => PANEL.y + 18 + i * 25;
+    const plotBtn  = { x: PANEL.x + 10, y: PANEL.y + 140, w: PANEL.w - 20, h: 24, act: 'plot',  label: 'Plot equipotential' };
+    const clearBtn = { x: PANEL.x + 10, y: PANEL.y + 170, w: PANEL.w - 20, h: 24, act: 'clear', label: 'Clear plots' };
+    const RESET = { cx: 772, cy: 564, r: 16 };
+    const wells = [
+      { type: 'charge', q: +1, cx: 80,  cy: 556, label: '+1 nC' },
+      { type: 'charge', q: -1, cx: 172, cy: 556, label: '−1 nC' },
+      { type: 'sensor',        cx: 268, cy: 556, label: 'Sensor' },
+    ];
+
+    let drag = null;             // {type:'charge'|'sensor'|'probe', idx, ox, oy}
+    let lastMx = -100, lastMy = -100;
+
+    // ── Formatting ───────────────────────────────────────────
+    function fmtNum(v) {
+      const a = Math.abs(v);
+      if (a >= 100) return v.toFixed(0);
+      if (a >= 10)  return v.toFixed(1);
+      return v.toFixed(2);
+    }
+    const fmtQ = q => (q > 0 ? '+' : '−') + (+Math.abs(q).toFixed(2)) + ' nC';
+
+    // ── Drawing helpers ──────────────────────────────────────
+    function rr(x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + w, y, x + w, y + h, r);
+      ctx.arcTo(x + w, y + h, x, y + h, r);
+      ctx.arcTo(x, y + h, x, y, r);
+      ctx.arcTo(x, y, x + w, y, r);
+      ctx.closePath();
+    }
+
+    // arrow centered on (px,py), screen angle ang, total length len
+    function drawArrow(px, py, ang, len, color, lw) {
+      const hs = Math.max(6, Math.min(10, len * 0.38));
+      ctx.save();
+      ctx.translate(px, py); ctx.rotate(ang);
+      ctx.strokeStyle = color; ctx.fillStyle = color;
+      ctx.lineWidth = lw; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(-len / 2, 0); ctx.lineTo(len / 2 - hs + 1, 0); ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(len / 2, 0);
+      ctx.lineTo(len / 2 - hs, -hs * 0.42);
+      ctx.lineTo(len / 2 - hs,  hs * 0.42);
+      ctx.closePath(); ctx.fill();
+      ctx.restore();
+    }
+
+    function labelBox(px, py, text, fg, bg, stroke, font) {
+      ctx.font = font || '11px Segoe UI';
+      const tw = ctx.measureText(text).width;
+      const w = tw + 12, h = 18;
+      rr(px - w / 2, py - h / 2, w, h, 5);
+      ctx.fillStyle = bg; ctx.fill();
+      if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1; ctx.stroke(); }
+      ctx.fillStyle = fg; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(text, px, py + 0.5);
+      ctx.textBaseline = 'alphabetic';
+    }
+
+    function drawChargeDisc(px, py, q, r, hl) {
+      if (hl) { ctx.save(); ctx.shadowColor = q > 0 ? '#ff7a70' : '#74a4ff'; ctx.shadowBlur = 14; }
+      const g = ctx.createRadialGradient(px - r * 0.35, py - r * 0.4, r * 0.15, px, py, r);
+      if (q > 0) {
+        g.addColorStop(0, '#ffb0a8'); g.addColorStop(0.55, '#e0392e'); g.addColorStop(1, '#7e120c');
+      } else {
+        g.addColorStop(0, '#b8d2ff'); g.addColorStop(0.55, '#2f63d8'); g.addColorStop(1, '#0e2a6e');
+      }
+      ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2);
+      ctx.fillStyle = g; ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = 1.5; ctx.stroke();
+      // +/- glyph drawn with bars (crisper than font)
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+      const a = r * 0.48;
+      ctx.beginPath(); ctx.moveTo(px - a, py); ctx.lineTo(px + a, py); ctx.stroke();
+      if (q > 0) { ctx.beginPath(); ctx.moveTo(px, py - a); ctx.lineTo(px, py + a); ctx.stroke(); }
+      if (hl) ctx.restore();
+    }
+
+    function drawSensorDisc(px, py, r, hl) {
+      if (hl) { ctx.save(); ctx.shadowColor = '#ffd54a'; ctx.shadowBlur = 12; }
+      const g = ctx.createRadialGradient(px - r * 0.3, py - r * 0.35, r * 0.1, px, py, r);
+      g.addColorStop(0, '#fff3c0'); g.addColorStop(0.6, '#ffd23e'); g.addColorStop(1, '#9a7400');
+      ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2);
+      ctx.fillStyle = g; ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.5)'; ctx.lineWidth = 1.4; ctx.stroke();
+      ctx.beginPath(); ctx.arc(px, py, 1.6, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fill();
+      if (hl) ctx.restore();
+    }
+
+    function drawCheckbox(x, y, checked, dim) {
+      ctx.save();
+      if (dim) ctx.globalAlpha = 0.38;
+      rr(x, y, 14, 14, 3);
+      ctx.fillStyle = checked ? '#2f86d6' : 'rgba(255,255,255,0.04)';
+      ctx.fill();
+      ctx.strokeStyle = '#93a7c4'; ctx.lineWidth = 1.3; ctx.stroke();
+      if (checked) {
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        ctx.beginPath();
+        ctx.moveTo(x + 3.2, y + 7.4); ctx.lineTo(x + 5.9, y + 10.2); ctx.lineTo(x + 10.8, y + 3.8);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function drawButton(b, enabled) {
+      ctx.save();
+      if (!enabled) ctx.globalAlpha = 0.4;
+      const hov = enabled && lastMx >= b.x && lastMx <= b.x + b.w && lastMy >= b.y && lastMy <= b.y + b.h;
+      rr(b.x, b.y, b.w, b.h, 6);
+      ctx.fillStyle = hov ? '#34456b' : '#28344e'; ctx.fill();
+      ctx.strokeStyle = '#41557e'; ctx.lineWidth = 1; ctx.stroke();
+      ctx.fillStyle = '#dbe6f5'; ctx.font = '12px Segoe UI';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2 + 0.5);
+      ctx.textBaseline = 'alphabetic';
+      ctx.restore();
+    }
+
+    // ── Scene drawing ────────────────────────────────────────
+    function drawGrid() {
+      const minor = 'rgba(220,232,255,0.05)', major = 'rgba(220,232,255,0.12)';
+      for (let x = 0; x <= WORLD_W + 1e-9; x += 0.5) {
+        const px = Math.round(sx(x)) + 0.5;
+        ctx.strokeStyle = (Math.round(x * 2) % 2 === 0) ? major : minor;
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, PLAY_H); ctx.stroke();
+      }
+      for (let y = 0; y <= WORLD_H + 1e-9; y += 0.5) {
+        const py = Math.round(sy(y)) + 0.5;
+        ctx.strokeStyle = (Math.round(y * 2) % 2 === 0) ? major : minor;
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(W, py); ctx.stroke();
+      }
+      // 1 m measuring scale (bottom-left)
+      const x1 = sx(0.35), x2 = sx(1.35), y0 = sy(0.4);
+      ctx.strokeStyle = 'rgba(159,178,200,0.95)'; ctx.lineWidth = 1.6; ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(x1, y0); ctx.lineTo(x2, y0);
+      ctx.moveTo(x1, y0 - 5); ctx.lineTo(x1, y0 + 5);
+      ctx.moveTo(x2, y0 - 5); ctx.lineTo(x2, y0 + 5);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(159,178,200,0.95)'; ctx.font = '11px Segoe UI'; ctx.textAlign = 'center';
+      ctx.fillText('1 m', (x1 + x2) / 2, y0 - 8);
+    }
+
+    function drawFieldGrid() {
+      const SP = 0.5;                      // lattice spacing (m), offset 0.25 m
+      for (let gy = 0.25; gy < WORLD_H; gy += SP) {
+        for (let gx = 0.25; gx < WORLD_W; gx += SP) {
+          const { Ex, Ey, E } = fieldAt(gx, gy);
+          if (E < 0.005) continue;
+          const m = magFrac(E);
+          const alpha = Math.max(0.07, m);
+          const len = show.dirOnly ? 30 : 8 + 28 * m;
+          drawArrow(sx(gx), sy(gy), Math.atan2(-Ey, Ex), len,
+                    'rgba(245,248,255,' + alpha.toFixed(3) + ')', 2.2);
+        }
+      }
+    }
+
+    function drawContours() {
+      ctx.save();
+      ctx.beginPath(); ctx.rect(0, 0, W, PLAY_H); ctx.clip();
+      for (const c of contours) {
+        ctx.strokeStyle = 'rgba(120,235,160,0.9)'; ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        for (const s of c.segs) {
+          ctx.moveTo(sx(s[0]), sy(s[1]));
+          ctx.lineTo(sx(s[2]), sy(s[3]));
+        }
+        ctx.stroke();
+        labelBox(sx(c.lx) + 30, sy(c.ly) - 16, fmtNum(c.V) + ' V',
+                 '#9df0b4', 'rgba(10,30,16,0.85)', 'rgba(120,235,160,0.6)');
+      }
+      ctx.restore();
+    }
+
+    function drawCharge(c, hl) {
+      const px = sx(c.x), py = sy(c.y);
+      drawChargeDisc(px, py, c.q, 13, hl);
+      if (show.values) {
+        ctx.fillStyle = c.q > 0 ? 'rgba(255,196,190,0.92)' : 'rgba(178,204,255,0.92)';
+        ctx.font = '11px Segoe UI'; ctx.textAlign = 'center';
+        ctx.fillText(fmtQ(c.q), px, py + 26);
+      }
+    }
+
+    function drawSensor(s, hl) {
+      const px = sx(s.x), py = sy(s.y);
+      const { Ex, Ey, E } = fieldAt(s.x, s.y);
+      if (E > 0.005) {
+        const len = 14 + 40 * magFrac(E);
+        const ang = Math.atan2(-Ey, Ex);
+        // tail anchored at the sensor point
+        drawArrow(px + Math.cos(ang) * len / 2, py + Math.sin(ang) * len / 2,
+                  ang, len, 'rgba(255,198,63,0.95)', 2.6);
+      }
+      drawSensorDisc(px, py, 8, hl);
+      const deg = E > 0.005 ? Math.round((Math.atan2(Ey, Ex) * 180 / Math.PI + 360) % 360) : null;
+      const text = E > 0.005 ? fmtNum(E) + ' V/m  ∠' + deg + '°' : '0 V/m';
+      labelBox(px, py + 22, text, '#ffe08a', 'rgba(8,10,16,0.72)');
+    }
+
+    function drawProbe(hl) {
+      const px = sx(probe.x), py = sy(probe.y);
+      const V = potAt(probe.x, probe.y);
+      if (hl) { ctx.save(); ctx.shadowColor = '#c79bf2'; ctx.shadowBlur = 12; }
+      ctx.beginPath(); ctx.arc(px, py, 10, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(150,90,230,0.16)'; ctx.fill();
+      ctx.strokeStyle = '#c79bf2'; ctx.lineWidth = 2.2; ctx.stroke();
+      if (hl) ctx.restore();
+      ctx.strokeStyle = 'rgba(199,155,242,0.85)'; ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(px - 14, py); ctx.lineTo(px - 6, py);
+      ctx.moveTo(px + 6, py);  ctx.lineTo(px + 14, py);
+      ctx.moveTo(px, py - 14); ctx.lineTo(px, py - 6);
+      ctx.moveTo(px, py + 6);  ctx.lineTo(px, py + 14);
+      ctx.stroke();
+      ctx.beginPath(); ctx.arc(px, py, 1.5, 0, Math.PI * 2);
+      ctx.fillStyle = '#e8d6ff'; ctx.fill();
+      // readout box below
+      ctx.beginPath(); ctx.moveTo(px, py + 14); ctx.lineTo(px, py + 20);
+      ctx.strokeStyle = '#8a5fc0'; ctx.lineWidth = 1.2; ctx.stroke();
+      labelBox(px, py + 30, fmtNum(V) + ' V', '#efe2ff', 'rgba(34,22,54,0.92)',
+               '#8a5fc0', 'bold 12px Segoe UI');
+    }
+
+    function drawTray() {
+      ctx.fillStyle = '#161d2b'; ctx.fillRect(0, PLAY_H, W, TRAY_H);
+      ctx.strokeStyle = '#2e3a52'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(0, PLAY_H + 0.5); ctx.lineTo(W, PLAY_H + 0.5); ctx.stroke();
+      for (const wll of wells) {
+        const hov = !drag && Math.hypot(lastMx - wll.cx, lastMy - wll.cy) < 22;
+        // stacked look
+        if (wll.type === 'charge') {
+          ctx.save(); ctx.globalAlpha = 0.45;
+          drawChargeDisc(wll.cx + 4, wll.cy + 4, wll.q, 13, false);
+          ctx.restore();
+          drawChargeDisc(wll.cx, wll.cy, wll.q, 13, hov);
+        } else {
+          ctx.save(); ctx.globalAlpha = 0.45;
+          drawSensorDisc(wll.cx + 3, wll.cy + 3, 8, false);
+          ctx.restore();
+          drawSensorDisc(wll.cx, wll.cy, 8, hov);
+        }
+        ctx.fillStyle = '#aab8cf'; ctx.font = '11px Segoe UI'; ctx.textAlign = 'center';
+        ctx.fillText(wll.label, wll.cx, 592);
+      }
+      ctx.fillStyle = '#5d6c84'; ctx.font = '11.5px Segoe UI'; ctx.textAlign = 'center';
+      ctx.fillText('Drag items onto the canvas · drop them back here to remove', 510, 561);
+      // reset button
+      const hovR = Math.hypot(lastMx - RESET.cx, lastMy - RESET.cy) < RESET.r + 2;
+      ctx.beginPath(); ctx.arc(RESET.cx, RESET.cy, RESET.r, 0, Math.PI * 2);
+      ctx.fillStyle = hovR ? '#2d3c5c' : '#233048'; ctx.fill();
+      ctx.strokeStyle = '#44598a'; ctx.lineWidth = 1.2; ctx.stroke();
+      ctx.fillStyle = '#cfe0ff'; ctx.font = '17px Segoe UI';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('↺', RESET.cx, RESET.cy + 1);
+      ctx.textBaseline = 'alphabetic';
+    }
+
+    function drawPanel() {
+      rr(PANEL.x, PANEL.y, PANEL.w, PANEL.h, 8);
+      ctx.fillStyle = 'rgba(16,21,32,0.92)'; ctx.fill();
+      ctx.strokeStyle = '#344563'; ctx.lineWidth = 1; ctx.stroke();
+      rows.forEach((r, i) => {
+        const cy = rowCy(i), ind = r.indent || 0;
+        const dim = r.needs && !show[r.needs];
+        drawCheckbox(PANEL.x + 12 + ind, cy - 7, show[r.key], dim);
+        ctx.save();
+        if (dim) ctx.globalAlpha = 0.38;
+        ctx.fillStyle = '#e6edf7'; ctx.font = '12.5px Segoe UI'; ctx.textAlign = 'left';
+        ctx.fillText(r.label, PANEL.x + 34 + ind, cy + 4);
+        ctx.restore();
+      });
+      drawButton(plotBtn, show.probe && charges.length > 0);
+      drawButton(clearBtn, true);
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = '#0b0e14'; ctx.fillRect(0, 0, W, H);
+
+      if (show.grid) drawGrid();
+      drawContours();
+      if (show.field) drawFieldGrid();
+
+      const hov = drag ? null : hitTest(lastMx, lastMy);
+      const isHov = (type, idx) => !!hov && hov.type === type && hov.idx === idx;
+      const isDrag = (type, idx) => !!drag && drag.type === type && drag.idx === idx;
+
+      charges.forEach((c, i) => drawCharge(c, isHov('charge', i) || isDrag('charge', i)));
+      sensors.forEach((s, i) => drawSensor(s, isHov('sensor', i) || isDrag('sensor', i)));
+      if (show.probe) drawProbe(isHov('probe', 0) || isDrag('probe', 0));
+
+      if (!clean) {
+        if (!charges.length && !sensors.length) {
+          ctx.fillStyle = '#5f7189'; ctx.font = '13px Segoe UI'; ctx.textAlign = 'center';
+          ctx.fillText('Drag charges and sensors from the tray onto the canvas', 300, 28);
+        }
+        drawTray();
+        drawPanel();
+        // dragged item rides on top of the tray
+        if (drag) {
+          if (drag.type === 'charge' && charges[drag.idx]) drawCharge(charges[drag.idx], true);
+          if (drag.type === 'sensor' && sensors[drag.idx]) drawSensor(sensors[drag.idx], true);
+          if (drag.type === 'probe') drawProbe(true);
+        }
+      }
+    }
+
+    // ── Animation loop ───────────────────────────────────────
+    let lastTs = null;
+    function frame(ts) {
+      if (!lastTs) lastTs = ts;
+      const dt = Math.min((ts - lastTs) / 1000, 0.05);  // (static sim; kept for house style)
+      lastTs = ts; void dt;
+      draw();
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+
+    // ── Interaction ──────────────────────────────────────────
+    const pos = e => {
+      const r = canvas.getBoundingClientRect();
+      return [e.clientX - r.left, e.clientY - r.top];
+    };
+
+    function hitTest(mx, my) {
+      if (show.probe) {
+        const px = sx(probe.x), py = sy(probe.y);
+        if (Math.hypot(mx - px, my - py) < 16 ||
+            (Math.abs(mx - px) < 36 && my > py + 20 && my < py + 42)) return { type: 'probe', idx: 0 };
+      }
+      for (let i = sensors.length - 1; i >= 0; i--) {
+        if (Math.hypot(mx - sx(sensors[i].x), my - sy(sensors[i].y)) < 12) return { type: 'sensor', idx: i };
+      }
+      for (let i = charges.length - 1; i >= 0; i--) {
+        if (Math.hypot(mx - sx(charges[i].x), my - sy(charges[i].y)) < 16) return { type: 'charge', idx: i };
+      }
+      return null;
+    }
+
+    function uiHit(mx, my) {
+      if (clean) return null;
+      if (Math.hypot(mx - RESET.cx, my - RESET.cy) < RESET.r + 2) return { act: 'reset' };
+      if (mx >= PANEL.x && mx <= PANEL.x + PANEL.w && my >= PANEL.y && my <= PANEL.y + PANEL.h) {
+        for (let i = 0; i < rows.length; i++) {
+          const cy = rowCy(i);
+          if (my > cy - 12 && my < cy + 12) return { act: 'toggle', row: rows[i] };
+        }
+        for (const b of [plotBtn, clearBtn]) {
+          if (mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h) return { act: b.act };
+        }
+        return { act: 'panel' };
+      }
+      return null;
+    }
+
+    function wellHit(mx, my) {
+      if (clean) return null;
+      for (const wll of wells) {
+        if (Math.hypot(mx - wll.cx, my - wll.cy) < 22) return wll;
+      }
+      return null;
+    }
+
+    canvas.addEventListener('pointerdown', e => {
+      const [mx, my] = pos(e);
+      lastMx = mx; lastMy = my;
+
+      const ui = uiHit(mx, my);
+      if (ui) {
+        if (ui.act === 'reset') doReset();
+        else if (ui.act === 'toggle') {
+          const r = ui.row;
+          if (!(r.needs && !show[r.needs])) show[r.key] = !show[r.key];
+        }
+        else if (ui.act === 'plot') { if (show.probe && charges.length) plotEquipotential(); }
+        else if (ui.act === 'clear') contours = [];
+        return;
+      }
+
+      const hit = hitTest(mx, my);
+      if (hit) {
+        let opx, opy;
+        if (hit.type === 'probe') { opx = sx(probe.x); opy = sy(probe.y); }
+        else if (hit.type === 'sensor') { opx = sx(sensors[hit.idx].x); opy = sy(sensors[hit.idx].y); }
+        else { opx = sx(charges[hit.idx].x); opy = sy(charges[hit.idx].y); }
+        drag = { type: hit.type, idx: hit.idx, ox: opx - mx, oy: opy - my };
+        canvas.setPointerCapture(e.pointerId);
+        return;
+      }
+
+      const wll = wellHit(mx, my);
+      if (wll) {
+        if (wll.type === 'charge') {
+          charges.push({ q: wll.q, x: wx(mx), y: wy(my) });
+          drag = { type: 'charge', idx: charges.length - 1, ox: 0, oy: 0 };
+        } else {
+          sensors.push({ x: wx(mx), y: wy(my) });
+          drag = { type: 'sensor', idx: sensors.length - 1, ox: 0, oy: 0 };
+        }
+        canvas.setPointerCapture(e.pointerId);
+      }
+    });
+
+    canvas.addEventListener('pointermove', e => {
+      const [mx, my] = pos(e);
+      lastMx = mx; lastMy = my;
+      if (drag) {
+        const px = clamp(mx + drag.ox, 4, W - 4);
+        const py = clamp(my + drag.oy, 4, H - 4);
+        if (drag.type === 'probe') {
+          probe.x = clamp(wx(px), 0.15, WORLD_W - 0.15);
+          probe.y = clamp(wy(py), 0.2, WORLD_H - 0.2);
+        } else if (drag.type === 'sensor' && sensors[drag.idx]) {
+          sensors[drag.idx].x = wx(px); sensors[drag.idx].y = wy(py);
+        } else if (drag.type === 'charge' && charges[drag.idx]) {
+          charges[drag.idx].x = wx(px); charges[drag.idx].y = wy(py);
+        }
+        canvas.style.cursor = 'grabbing';
+        return;
+      }
+      const ui = uiHit(mx, my);
+      if (ui && ui.act !== 'panel') { canvas.style.cursor = 'pointer'; return; }
+      if (ui) { canvas.style.cursor = 'default'; return; }
+      canvas.style.cursor = (hitTest(mx, my) || wellHit(mx, my)) ? 'grab' : 'default';
+    });
+
+    function endDrag(e) {
+      if (!drag) return;
+      const [, my] = pos(e);
+      if (!clean && my > PLAY_H + 4) {
+        if (drag.type === 'charge') charges.splice(drag.idx, 1);
+        else if (drag.type === 'sensor') sensors.splice(drag.idx, 1);
+        else if (drag.type === 'probe') { probe.x = initial.probe.x; probe.y = initial.probe.y; }
+      }
+      drag = null;
+      canvas.style.cursor = 'default';
+    }
+    canvas.addEventListener('pointerup', endDrag);
+    canvas.addEventListener('pointercancel', endDrag);
+
+    doReset();
+  })();
+  </script>
+</body>
+</html>

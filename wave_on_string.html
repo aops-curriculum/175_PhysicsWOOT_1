@@ -1,0 +1,969 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Wave on a String</title>
+  <!-- Original AoPS interactive. Replaces the third-party "Wave on a String" simulation. -->
+<script>
+// EigenNode auto-height v2.4
+(function() {
+  // 4px buffer for subpixel rounding + parent's >=3px noise threshold.
+  // Extra 18px when horizontal overflow forces a scrollbar (eats vertical
+  // space inside the iframe — AoPS classroom embeds in a narrower column
+  // than the 600px content, so a horizontal scrollbar appears and steals
+  // ~10-17px of height). Without this, the iframe ends up ~11-15px short.
+  var BUFFER = 4;
+  var H_SCROLLBAR = 18;
+  var measuring = false;
+  function measure() {
+    if (measuring) return 0;
+    var b = document.body, h = document.documentElement;
+    if (!b) return 0;
+    measuring = true;
+    // Temporarily neutralise body's height/min-height (overriding stylesheet
+    // rules with !important) so scrollHeight reflects actual content extent.
+    // Without this, patterns like body { height: 100vh } cause scrollHeight
+    // to echo the iframe's current viewport — adding BUFFER each cycle
+    // ratchets the iframe taller forever. Browser doesn't paint until this
+    // synchronous block returns, so no visible flicker.
+    var hOld = b.style.height, hPri = b.style.getPropertyPriority('height');
+    var mOld = b.style.minHeight, mPri = b.style.getPropertyPriority('min-height');
+    b.style.setProperty('height', 'auto', 'important');
+    b.style.setProperty('min-height', '0', 'important');
+    var content = b.scrollHeight || 0;
+    if (hOld) b.style.setProperty('height', hOld, hPri); else b.style.removeProperty('height');
+    if (mOld) b.style.setProperty('min-height', mOld, mPri); else b.style.removeProperty('min-height');
+    measuring = false;
+    // Check the documentElement only — that's the element that owns the
+    // iframe's horizontal scrollbar. Body can be narrower than the iframe
+    // (e.g. body{width:600px} centered in a 700px iframe) and have its own
+    // 1-2px overflow that doesn't actually trigger a scrollbar.
+    var hOverflow = h && (h.scrollWidth - h.clientWidth) >= 4;
+    return Math.ceil(content) + BUFFER + (hOverflow ? H_SCROLLBAR : 0);
+  }
+  var last = 0;
+  function report() {
+    var h = measure();
+    if (h > 0 && Math.abs(h - last) >= 2) {
+      last = h;
+      window.parent.postMessage({ type: 'resize', height: h }, '*');
+    }
+  }
+  window.addEventListener('load', report);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(report);
+  if (window.ResizeObserver && document.body) new ResizeObserver(report).observe(document.body);
+})();
+</script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 800px; height: 500px; overflow: hidden;
+      background: #fbfcfe;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      user-select: none; -webkit-user-select: none;
+    }
+    canvas { display: block; touch-action: none; }
+    #bar {
+      width: 800px; height: 120px;
+      background: #eef2f7; border-top: 1px solid #ccd6e0;
+      display: flex; gap: 6px; padding: 5px 7px;
+      font-size: 11px; color: #2c3e50;
+    }
+    .grp {
+      background: #fff; border: 1px solid #d5dee6; border-radius: 8px;
+      padding: 4px 8px; display: flex; flex-direction: column; gap: 2px;
+    }
+    .gt {
+      font-size: 9.5px; font-weight: 600; color: #8295a6;
+      text-transform: uppercase; letter-spacing: .5px;
+    }
+    label { display: flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap; }
+    input[type=radio], input[type=checkbox] { margin: 0; width: 12px; height: 12px; accent-color: #3a78b5; cursor: pointer; }
+    .row { display: flex; align-items: center; gap: 3px; white-space: nowrap; height: 19px; }
+    .lab { width: 58px; color: #46586a; }
+    .un  { width: 16px; color: #7a8b9a; }
+    .mini { font-size: 9.5px; color: #8295a6; }
+    .val { min-width: 32px; text-align: center; font-weight: 600; }
+    .st {
+      width: 17px; height: 17px; border: 1px solid #9fb2c2; background: #f4f8fb;
+      border-radius: 4px; font-size: 12px; line-height: 1; cursor: pointer; padding: 0;
+      color: #2c3e50;
+    }
+    .st:hover { background: #e3eef7; }
+    input[type=range] { width: 62px; height: 14px; accent-color: #3a78b5; cursor: pointer; }
+    .btn {
+      font: 600 11px 'Segoe UI', system-ui, sans-serif; cursor: pointer;
+      border: 1px solid #9fb2c2; border-radius: 5px; background: #f4f8fb;
+      color: #2c3e50; padding: 2px 8px; margin-top: 2px;
+    }
+    .btn:hover { background: #e3eef7; }
+    #sendBtn { background: #e6f4e6; border-color: #76a876; color: #1d5c1d; }
+    #sendBtn:hover { background: #d4ecd4; }
+    #sendBtn:disabled { opacity: .45; cursor: default; }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <canvas id="c" width="800" height="380"></canvas>
+
+  <div id="bar">
+    <div class="grp">
+      <div class="gt">Drive</div>
+      <label><input type="radio" name="mode" value="manual" checked> Manual</label>
+      <label><input type="radio" name="mode" value="oscillate"> Oscillate</label>
+      <label><input type="radio" name="mode" value="pulse"> Pulse</label>
+      <button id="restartBtn" class="btn" title="Clear the string (keeps all settings)">Restart string</button>
+    </div>
+
+    <div class="grp" id="gSignal">
+      <div class="gt">Signal</div>
+      <div class="row" id="rowManual" style="color:#7a8b9a">Drag the gray handle up and down.</div>
+      <div class="row" id="rowAmp">
+        <span class="lab">Amplitude</span>
+        <button class="st" id="ampDn">&minus;</button><span class="val" id="ampVal">0.75</span><button class="st" id="ampUp">+</button><span class="un">cm</span>
+        <input type="range" id="ampSl" min="0" max="1.3" step="0.01" value="0.75">
+      </div>
+      <div class="row" id="rowFreq">
+        <span class="lab">Frequency</span>
+        <button class="st" id="freqDn">&minus;</button><span class="val" id="freqVal">1.50</span><button class="st" id="freqUp">+</button><span class="un">Hz</span>
+        <input type="range" id="freqSl" min="0" max="3" step="0.01" value="1.5">
+      </div>
+      <div class="row" id="rowWidth">
+        <span class="lab">Pulse width</span>
+        <button class="st" id="pwDn">&minus;</button><span class="val" id="pwVal">0.50</span><button class="st" id="pwUp">+</button><span class="un">s</span>
+        <input type="range" id="pwSl" min="0.1" max="1" step="0.01" value="0.5">
+      </div>
+      <div class="row" id="rowSend"><button id="sendBtn" class="btn">&#9679; Send pulse</button></div>
+    </div>
+
+    <div class="grp">
+      <div class="gt">String</div>
+      <div class="row">
+        <span class="lab">Damping</span><span class="mini">None</span>
+        <input type="range" id="dampSl" min="0" max="100" step="1" value="10"><span class="mini">Lots</span>
+      </div>
+      <div class="row">
+        <span class="lab">Tension</span>
+        <label><input type="radio" name="tension" value="low"> Low</label>
+        <label><input type="radio" name="tension" value="mid" checked> Mid</label>
+        <label><input type="radio" name="tension" value="high"> High</label>
+      </div>
+    </div>
+
+    <div class="grp">
+      <div class="gt">End</div>
+      <label><input type="radio" name="end" value="fixed" checked> Fixed end</label>
+      <label><input type="radio" name="end" value="loose"> Loose end</label>
+      <label><input type="radio" name="end" value="none"> No end</label>
+    </div>
+
+    <div class="grp">
+      <div class="gt">Tools</div>
+      <label><input type="checkbox" id="ckRulers"> Rulers</label>
+      <label><input type="checkbox" id="ckRef"> Reference line</label>
+      <label><input type="checkbox" id="ckTimer"> Timer</label>
+    </div>
+  </div>
+
+<script>
+(() => {
+  'use strict';
+
+  // ════════════════════════════════════════════════════════════════════
+  //  PHYSICS MODEL
+  //  Discrete beaded string: N = 61 beads, spacing DX = 0.125 cm, total
+  //  length L = 7.5 cm. Bead 0 is prescribed by the driver; interior
+  //  beads obey the discretized wave equation
+  //      y_i'' = (c^2/DX^2)(y_{i+1} - 2 y_i + y_{i-1}) - b y_i'
+  //  integrated with semi-implicit (symplectic) Euler at fixed substeps
+  //  DT_SUB = 1/240 s (Courant number c*DT/DX <= 0.125, very stable).
+  //  Tension sets the wave speed c: low 1.25, mid 2.50, high 3.75 cm/s.
+  //
+  //  Boundaries (right end, bead 60):
+  //    fixed : y = 0                         -> inverted reflection
+  //    loose : a = (c^2/DX^2)(y_59 - y_60)   -> upright reflection
+  //    none  : matched termination (half-mass end bead + impedance-
+  //            matched dashpot):  a = 2(c^2/DX^2)(y_59 - y_60) - 2(c/DX) y'
+  //            -> absorbs outgoing waves (measured residual ~1%).
+  //
+  //  RESONANT FREQUENCIES (oscillate + fixed end + zero damping).
+  //  The driven end is approximately a node, so the string resonates at
+  //  the normal modes of the 59 free beads with fixed ends:
+  //      f_n = (c / (pi*DX)) * sin(n*pi/120)        [numerically verified]
+  //  High tension (c = 3.75 cm/s):
+  //      f_1..f_5 = 0.250, 0.500, 0.749, 0.998, 1.246 Hz
+  //      (teacher set with 0.01-Hz steps: 0.25, 0.50, 0.75, 1.00, 1.25 Hz)
+  //  Mid tension (c = 2.50): 0.167, 0.333, 0.499, 0.665, 0.831 Hz
+  //  Low tension (c = 1.25): 0.083, 0.167, 0.250, 0.333, 0.415 Hz
+  //
+  //  Calibration: at high tension, 1.50 Hz gives wavelength c/f = 2.50 cm,
+  //  read directly off the cm rulers (90 px/cm in both directions).
+  // ════════════════════════════════════════════════════════════════════
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const W = 800, H = 380;
+
+  // ── Physics constants ────────────────────────────────────────────────
+  const N = 61;                 // beads (0 = driver end, 60 = far end)
+  const DX = 0.125;             // cm between beads -> string length 7.5 cm
+  const DT_SUB = 1 / 240;       // fixed physics substep (s)
+  const YCLAMP = 1.9;           // max |y| in cm (keeps resonance on screen)
+  const SPEEDS = { low: 1.25, mid: 2.5, high: 3.75 };   // wave speed cm/s
+  const DRIVER_MAX_RATE = 30;   // cm/s rate limit on driver motion
+  const STEP_SIM = 1 / 30;      // sim seconds advanced per "step" click
+
+  // ── Layout constants ─────────────────────────────────────────────────
+  const PX_PER_CM = 90;
+  const X0 = 75;                          // x of bead 0 (px)
+  const DXPX = DX * PX_PER_CM;            // 11.25 px between beads
+  const XEND = X0 + (N - 1) * DXPX;       // 750 = x of bead 60
+  const EQY = 185;                        // equilibrium line y (px)
+  const CARX = 57;                        // driver carriage center x
+  const RULER_BOT = EQY + 2 * PX_PER_CM;  // y where vertical ruler reads 0 cm
+
+  // ── URL configuration ────────────────────────────────────────────────
+  const qp = new URLSearchParams(location.search);
+  const DEFAULTS = {
+    mode: 'manual', end: 'fixed', amp: 0.75, freq: 1.5, width: 0.5,
+    damping: 10, tension: 'mid', slow: false, paused: false,
+    rulers: false, refline: false, timer: false, refy: 2.5,
+    shape: 'bump',          // pulse profile: 'bump' (rounded sin^2) | 'triangle'
+  };
+  // Named presets matching the classroom uses (see build notes).
+  const PRESETS = {
+    'explore':       { mode: 'manual', end: 'none', tension: 'mid', damping: 10 },
+    'snapshot-pulse':{ mode: 'pulse', end: 'none', tension: 'high', damping: 0, slow: true, amp: 0.75, width: 0.5 },
+    'snapshot-wave': { mode: 'oscillate', end: 'none', tension: 'high', damping: 0, slow: true, amp: 1.0, freq: 0.8 },
+    'measure':       { mode: 'oscillate', end: 'none', tension: 'high', damping: 0, slow: true, amp: 1.0, freq: 1.5, rulers: true, refline: true, refy: 1.0 },
+    'standing':      { mode: 'oscillate', end: 'fixed', tension: 'high', damping: 0, amp: 0.03, freq: 0.5 },
+    'pulse-fixed':   { mode: 'pulse', end: 'fixed', tension: 'high', damping: 0, slow: true, amp: 0.75, width: 0.5 },
+    'pulse-loose':   { mode: 'pulse', end: 'loose', tension: 'high', damping: 0, slow: true, amp: 0.75, width: 0.5 },
+  };
+  PRESETS['explore-no-end'] = PRESETS['explore'];      // unit-spec alias
+  PRESETS['standing-wave'] = PRESETS['standing'];      // unit-spec alias
+  function parseConfig() {
+    const c = Object.assign({}, DEFAULTS, PRESETS[qp.get('preset')] || {});
+    const num = (k, lo, hi) => {
+      const x = parseFloat(qp.get(k));
+      if (isFinite(x)) c[k === 'pw' || k === 'pulsewidth' ? 'width' : k] = Math.min(hi, Math.max(lo, x));
+    };
+    const flag = (k, key) => {
+      const s = qp.get(k);
+      if (s !== null) c[key || k] = (s === '1' || s === 'true' || s === 'yes');
+    };
+    const m = (qp.get('mode') || '').toLowerCase();
+    if (['manual', 'oscillate', 'pulse'].includes(m)) c.mode = m;
+    let e = (qp.get('end') || '').toLowerCase();
+    if (e === 'no' || e === 'noend' || e === 'no-end' || e === 'open') e = 'none';
+    if (['fixed', 'loose', 'none'].includes(e)) c.end = e;
+    const t = (qp.get('tension') || '').toLowerCase();
+    if (['low', 'mid', 'high'].includes(t)) c.tension = t;
+    const sh = (qp.get('shape') || '').toLowerCase();
+    if (['bump', 'triangle'].includes(sh)) c.shape = sh;
+    num('amp', 0, 1.3); num('freq', 0, 3);
+    num('width', 0.1, 1); num('pw', 0.1, 1); num('pulsewidth', 0.1, 1);
+    num('damping', 0, 100); num('refy', 0, 4);
+    flag('slow'); flag('paused'); flag('rulers'); flag('refline'); flag('timer');
+    return c;
+  }
+  const INIT = parseConfig();
+  const CLEAN = qp.get('clean') === '1';   // hide on-canvas chrome (captures)
+  const NOBAR = qp.get('nobar') === '1';   // hide the HTML control bar
+  if (NOBAR) {
+    document.getElementById('bar').classList.add('hidden');
+    document.body.style.height = H + 'px';
+  }
+
+  // ── State ────────────────────────────────────────────────────────────
+  let cfg = Object.assign({}, INIT);
+  const y = new Float64Array(N), v = new Float64Array(N);
+  let simT = 0;            // simulated time (s)
+  let phase = 0;           // oscillator phase (rad)
+  let pulseT = -1;         // time into current pulse; < 0 = no pulse
+  let pulseSign = 1;       // +1 = upward pulse, -1 = inverted (set per pulse)
+  let manualY = 0;         // driver target in manual mode (cm)
+  let paused = INIT.paused;
+  let acc = 0;             // physics time accumulator
+  let interacted = false;  // hides the hint after first touch
+
+  // Tool positions (px) and state
+  const HR0 = { x: X0, y: 12 }, VR0 = { x: 6, y: EQY - 2 * PX_PER_CM };
+  const TM0 = { x: 336, y: 46 };
+  let hr = Object.assign({}, HR0);   // horizontal ruler (630 x 28)
+  let vr = Object.assign({}, VR0);   // vertical ruler (28 x 360)
+  let tm = Object.assign({}, TM0);   // timer panel (112 x 62)
+  let refY = INIT.refy;              // reference line, in ruler cm (0..4)
+  const timer = { running: false, t: 0 };
+  let drag = null;                   // current pointer drag
+
+  // ── Physics ──────────────────────────────────────────────────────────
+  function driveTarget() {
+    if (cfg.mode === 'oscillate') return cfg.amp * Math.sin(phase);
+    if (cfg.mode === 'pulse') {
+      if (pulseT < 0) return 0;
+      const u = pulseT / cfg.width;                       // 0..1 over the pulse
+      const profile = cfg.shape === 'triangle'
+        ? (1 - Math.abs(2 * u - 1))                       // symmetric triangle, peak at u=0.5
+        : Math.sin(Math.PI * u) ** 2;                     // default rounded bump
+      return pulseSign * cfg.amp * profile;
+    }
+    return manualY;
+  }
+
+  function stepPhysics() {
+    const c = SPEEDS[cfg.tension];
+    const b = 0.03 * cfg.damping;            // slider 0..100 -> 0..3 s^-1
+    const k = (c * c) / (DX * DX);
+
+    // advance the drive signal
+    if (cfg.mode === 'oscillate') phase += 2 * Math.PI * cfg.freq * DT_SUB;
+    if (cfg.mode === 'pulse' && pulseT >= 0) {
+      pulseT += DT_SUB;
+      if (pulseT >= cfg.width) pulseT = -1;
+    }
+    // rate-limited driver (smooths drags and mode switches)
+    const maxStep = DRIVER_MAX_RATE * DT_SUB;
+    const dy = driveTarget() - y[0];
+    y[0] += Math.max(-maxStep, Math.min(maxStep, dy));
+
+    // velocity update (implicit damping for unconditional stability)
+    for (let i = 1; i < N - 1; i++) {
+      const a = k * (y[i + 1] - 2 * y[i] + y[i - 1]);
+      v[i] = (v[i] + a * DT_SUB) / (1 + b * DT_SUB);
+    }
+    if (cfg.end === 'loose') {
+      const a = k * (y[N - 2] - y[N - 1]);
+      v[N - 1] = (v[N - 1] + a * DT_SUB) / (1 + b * DT_SUB);
+    } else if (cfg.end === 'none') {
+      // matched termination: absorbs outgoing waves (residual ~1%)
+      const a = 2 * k * (y[N - 2] - y[N - 1]);
+      v[N - 1] = (v[N - 1] + a * DT_SUB) / (1 + (2 * c / DX + b) * DT_SUB);
+    }
+    // position update
+    for (let i = 1; i < N - 1; i++) y[i] += v[i] * DT_SUB;
+    if (cfg.end === 'fixed') { y[N - 1] = 0; v[N - 1] = 0; }
+    else y[N - 1] += v[N - 1] * DT_SUB;
+    // soft clamp so resonant growth stays on screen
+    for (let i = 1; i < N; i++) {
+      if (y[i] > YCLAMP) { y[i] = YCLAMP; if (v[i] > 0) v[i] = 0; }
+      else if (y[i] < -YCLAMP) { y[i] = -YCLAMP; if (v[i] < 0) v[i] = 0; }
+    }
+    simT += DT_SUB;
+    if (timer.running) timer.t += DT_SUB;
+  }
+
+  function advanceSim(simSeconds) {
+    const n = Math.round(simSeconds / DT_SUB);
+    for (let i = 0; i < n; i++) stepPhysics();
+  }
+
+  function restartString() {
+    y.fill(0); v.fill(0);
+    phase = 0; pulseT = -1; pulseSign = 1; manualY = 0; simT = 0; acc = 0;
+  }
+
+  function resetAll() {
+    cfg = Object.assign({}, INIT);
+    paused = INIT.paused;
+    hr = Object.assign({}, HR0); vr = Object.assign({}, VR0);
+    tm = Object.assign({}, TM0);
+    refY = INIT.refy;
+    timer.running = false; timer.t = 0;
+    interacted = false;
+    restartString();
+    syncControls();
+  }
+
+  function stepOnce() { paused = true; advanceSim(STEP_SIM); }
+
+  // ── Bead sprites (pre-rendered shaded balls) ─────────────────────────
+  function beadSprite(r, base, light, dark) {
+    const cv = document.createElement('canvas');
+    const s = 2 * r + 4;
+    cv.width = s; cv.height = s;
+    const g = cv.getContext('2d');
+    const grad = g.createRadialGradient(s / 2 - r * 0.4, s / 2 - r * 0.45, r * 0.15, s / 2, s / 2, r);
+    grad.addColorStop(0, light);
+    grad.addColorStop(0.55, base);
+    grad.addColorStop(1, dark);
+    g.fillStyle = grad;
+    g.beginPath(); g.arc(s / 2, s / 2, r, 0, Math.PI * 2); g.fill();
+    g.strokeStyle = 'rgba(0,0,0,0.35)'; g.lineWidth = 0.8; g.stroke();
+    return cv;
+  }
+  const R_RED = 5, R_GREEN = 6.5;   // every 5th bead is green & slightly larger
+  const redBead = beadSprite(R_RED, '#d42a1e', '#ff8a72', '#7e120b');
+  const greenBead = beadSprite(R_GREEN, '#2db52d', '#9cf59c', '#0f6e0f');
+
+  const beadX = i => X0 + i * DXPX;
+  const beadY = i => EQY - y[i] * PX_PER_CM;
+
+  // ── Drawing ──────────────────────────────────────────────────────────
+  function rr(x, yy, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, yy);
+    ctx.arcTo(x + w, yy, x + w, yy + h, r);
+    ctx.arcTo(x + w, yy + h, x, yy + h, r);
+    ctx.arcTo(x, yy + h, x, yy, r);
+    ctx.arcTo(x, yy, x + w, yy, r);
+    ctx.closePath();
+  }
+
+  function drawEquilibrium() {
+    ctx.save();
+    ctx.strokeStyle = '#e6a23c'; ctx.lineWidth = 1.5;
+    ctx.setLineDash([9, 7]);
+    ctx.beginPath();
+    ctx.moveTo(X0, EQY);
+    ctx.lineTo(cfg.end === 'none' ? W - 10 : XEND, EQY);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // fade-out factor near the open ("no end") window
+  const FADE_X0 = 655, FADE_X1 = 748;
+  function fadeAlpha(x) {
+    if (cfg.end !== 'none') return 1;
+    return Math.max(0, Math.min(1, (FADE_X1 - x) / (FADE_X1 - FADE_X0)));
+  }
+
+  function drawDriver() {
+    const cy = EQY - y[0] * PX_PER_CM;
+    // guide rail
+    ctx.fillStyle = '#cfd6dd';
+    rr(CARX - 4, 48, 8, 284, 4); ctx.fill();
+    ctx.strokeStyle = '#9aa6b2'; ctx.lineWidth = 1; ctx.stroke();
+    // piston rod from motor up to carriage
+    ctx.fillStyle = '#8b95a0';
+    ctx.fillRect(CARX - 2, cy + 10, 4, Math.max(6, 330 - cy - 10));
+    // motor box
+    const mg = ctx.createLinearGradient(0, 328, 0, 372);
+    mg.addColorStop(0, '#b3bdc7'); mg.addColorStop(1, '#7f8a95');
+    ctx.fillStyle = mg;
+    rr(28, 328, 60, 44, 6); ctx.fill();
+    ctx.strokeStyle = '#5f6a75'; ctx.lineWidth = 1.2; ctx.stroke();
+    // flywheel + crank pin (turns with the oscillator phase)
+    ctx.beginPath(); ctx.arc(58, 350, 13, 0, Math.PI * 2);
+    ctx.fillStyle = '#6c7681'; ctx.fill();
+    ctx.strokeStyle = '#4e575f'; ctx.lineWidth = 1.5; ctx.stroke();
+    const ang = (cfg.mode === 'oscillate') ? phase - Math.PI / 2 : -Math.PI / 2;
+    ctx.beginPath();
+    ctx.arc(58 + 8 * Math.cos(ang), 350 + 8 * Math.sin(ang), 3, 0, Math.PI * 2);
+    ctx.fillStyle = '#e2e8ee'; ctx.fill();
+    // arm out to bead 0
+    ctx.fillStyle = '#6b7682';
+    ctx.fillRect(CARX + 9, cy - 3, X0 - CARX - 4, 6);
+    // carriage (the drag handle in manual mode)
+    const hl = (cfg.mode === 'manual') &&
+               (drag && drag.type === 'driver' || hoverItem === 'driver');
+    const cg = ctx.createLinearGradient(0, cy - 15, 0, cy + 15);
+    cg.addColorStop(0, '#eef2f6'); cg.addColorStop(1, '#b4bec8');
+    ctx.fillStyle = cg;
+    if (hl) { ctx.save(); ctx.shadowColor = '#4a90d9'; ctx.shadowBlur = 12; }
+    rr(CARX - 13, cy - 15, 26, 30, 5); ctx.fill();
+    if (hl) ctx.restore();
+    ctx.strokeStyle = (cfg.mode === 'manual') ? '#3f72b0' : '#6b7682';
+    ctx.lineWidth = hl ? 2 : 1.2;
+    rr(CARX - 13, cy - 15, 26, 30, 5); ctx.stroke();
+    // grip lines
+    ctx.strokeStyle = 'rgba(70,88,106,0.55)'; ctx.lineWidth = 1;
+    for (let i = -1; i <= 1; i++) {
+      ctx.beginPath();
+      ctx.moveTo(CARX - 7, cy + i * 5); ctx.lineTo(CARX + 7, cy + i * 5);
+      ctx.stroke();
+    }
+  }
+
+  function drawString() {
+    // connecting line
+    if (cfg.end === 'none') {
+      const g = ctx.createLinearGradient(0, 0, W, 0);
+      g.addColorStop(0, '#cf3a2b');
+      g.addColorStop(FADE_X0 / W, '#cf3a2b');
+      g.addColorStop(FADE_X1 / W, 'rgba(207,58,43,0)');
+      g.addColorStop(1, 'rgba(207,58,43,0)');
+      ctx.strokeStyle = g;
+    } else {
+      ctx.strokeStyle = '#cf3a2b';
+    }
+    ctx.lineWidth = 2; ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(beadX(0), beadY(0));
+    for (let i = 1; i < N; i++) ctx.lineTo(beadX(i), beadY(i));
+    ctx.stroke();
+    // beads (every 5th green and slightly larger)
+    for (let i = 0; i < N; i++) {
+      const a = fadeAlpha(beadX(i));
+      if (a <= 0) continue;
+      ctx.globalAlpha = a;
+      const sp = (i % 5 === 0) ? greenBead : redBead;
+      ctx.drawImage(sp, beadX(i) - sp.width / 2, beadY(i) - sp.height / 2);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawFixedEnd() {
+    // vise column with a side jaw gripping the last bead (original design)
+    const colG = ctx.createLinearGradient(758, 0, 784, 0);
+    colG.addColorStop(0, '#aab3bc'); colG.addColorStop(1, '#7e8893');
+    ctx.fillStyle = colG;
+    rr(758, 60, 26, 312, 4); ctx.fill();
+    ctx.strokeStyle = '#59636d'; ctx.lineWidth = 1.2; ctx.stroke();
+    // back plate + jaws
+    ctx.fillStyle = '#59636d';
+    ctx.fillRect(754, EQY - 13, 8, 26);
+    rr(XEND - 11, EQY - 11, 22, 7, 2); ctx.fill();    // top jaw
+    rr(XEND - 11, EQY + 4, 22, 7, 2); ctx.fill();     // bottom jaw
+    // vise screw knob
+    ctx.beginPath(); ctx.arc(771, EQY + 30, 8, 0, Math.PI * 2);
+    ctx.fillStyle = '#cfd6dd'; ctx.fill();
+    ctx.strokeStyle = '#59636d'; ctx.lineWidth = 1.2; ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(771 - 5, EQY + 30); ctx.lineTo(771 + 5, EQY + 30);
+    ctx.moveTo(771, EQY + 25); ctx.lineTo(771, EQY + 35);
+    ctx.stroke();
+  }
+
+  function drawLooseEnd() {
+    // vertical pole with a sliding ring (original design)
+    ctx.fillStyle = '#4e575f';
+    rr(XEND - 13, 362, 26, 9, 3); ctx.fill();          // base plate
+    const pg = ctx.createLinearGradient(XEND - 3, 0, XEND + 3, 0);
+    pg.addColorStop(0, '#d7dde3'); pg.addColorStop(1, '#99a3ad');
+    ctx.fillStyle = pg;
+    rr(XEND - 3, 12, 6, 352, 3); ctx.fill();
+    ctx.strokeStyle = '#737e89'; ctx.lineWidth = 1; ctx.stroke();
+    // brass ring at the last bead
+    const ry = beadY(N - 1);
+    const ringG = ctx.createLinearGradient(0, ry - 12, 0, ry + 12);
+    ringG.addColorStop(0, '#ecd27e'); ringG.addColorStop(1, '#9c7c1e');
+    ctx.beginPath(); ctx.arc(XEND, ry, 10, 0, Math.PI * 2);
+    ctx.strokeStyle = ringG; ctx.lineWidth = 5.5; ctx.stroke();
+    ctx.beginPath(); ctx.arc(XEND, ry, 12.8, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(90,70,10,0.55)'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.beginPath(); ctx.arc(XEND, ry, 7.2, 0, Math.PI * 2); ctx.stroke();
+  }
+
+  function drawRefLine() {
+    const ly = RULER_BOT - refY * PX_PER_CM;
+    ctx.save();
+    ctx.strokeStyle = '#e04646'; ctx.lineWidth = 1.5;
+    ctx.setLineDash([12, 6]);
+    ctx.beginPath(); ctx.moveTo(40, ly); ctx.lineTo(W - 8, ly); ctx.stroke();
+    ctx.restore();
+    // drag tab at the left end
+    const hl = (drag && drag.type === 'ref') || hoverItem === 'ref';
+    ctx.fillStyle = hl ? '#ffe9e9' : '#fff5f5';
+    rr(26, ly - 7, 26, 14, 4); ctx.fill();
+    ctx.strokeStyle = '#e04646'; ctx.lineWidth = hl ? 1.8 : 1.2;
+    rr(26, ly - 7, 26, 14, 4); ctx.stroke();
+    ctx.fillStyle = '#e04646';
+    for (const dx of [-5, 0, 5]) {
+      ctx.beginPath(); ctx.arc(39 + dx, ly, 1.3, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  function drawHRuler() {
+    ctx.save();
+    ctx.globalAlpha = 0.94;
+    ctx.fillStyle = '#f6edd2';
+    rr(hr.x, hr.y, 630, 28, 4); ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = '#b39b66'; ctx.lineWidth = 1;
+    rr(hr.x, hr.y, 630, 28, 4); ctx.stroke();
+    ctx.fillStyle = '#5d4f2e'; ctx.strokeStyle = '#5d4f2e';
+    ctx.font = '9px Segoe UI'; ctx.textAlign = 'center';
+    const bot = hr.y + 28;
+    for (let i = 0; i <= 70; i++) {       // 0.1 cm ticks (9 px each)
+      const x = hr.x + i * 9;
+      const len = (i % 10 === 0) ? 13 : (i % 5 === 0) ? 9 : 5;
+      ctx.lineWidth = (i % 10 === 0) ? 1.2 : 0.7;
+      ctx.beginPath(); ctx.moveTo(x, bot); ctx.lineTo(x, bot - len); ctx.stroke();
+      if (i % 10 === 0) ctx.fillText(String(i / 10), x, bot - 16);
+    }
+    ctx.font = 'italic 8.5px Segoe UI';
+    ctx.fillText('cm', hr.x + 615, hr.y + 10);
+    ctx.restore();
+  }
+
+  function drawVRuler() {
+    ctx.save();
+    ctx.globalAlpha = 0.94;
+    ctx.fillStyle = '#f6edd2';
+    rr(vr.x, vr.y, 28, 360, 4); ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = '#b39b66'; ctx.lineWidth = 1;
+    rr(vr.x, vr.y, 28, 360, 4); ctx.stroke();
+    ctx.fillStyle = '#5d4f2e'; ctx.strokeStyle = '#5d4f2e';
+    ctx.font = '9px Segoe UI'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    const right = vr.x + 28, bot = vr.y + 360;
+    for (let i = 0; i <= 40; i++) {       // 0.1 cm ticks, 0 at the bottom
+      const yy = bot - i * 9;
+      const len = (i % 10 === 0) ? 13 : (i % 5 === 0) ? 9 : 5;
+      ctx.lineWidth = (i % 10 === 0) ? 1.2 : 0.7;
+      ctx.beginPath(); ctx.moveTo(right, yy); ctx.lineTo(right - len, yy); ctx.stroke();
+      if (i % 10 === 0) ctx.fillText(String(i / 10), vr.x + 3, yy);
+    }
+    ctx.font = 'italic 8.5px Segoe UI';
+    ctx.fillText('cm', vr.x + 4, vr.y + 8);
+    ctx.restore();
+  }
+
+  // Timer geometry helpers (panel 112 x 62)
+  const tmBody = () => ({ x: tm.x, y: tm.y, w: 112, h: 62 });
+  const tmBtn1 = () => ({ x: tm.x + 8, y: tm.y + 38, w: 46, h: 18 });
+  const tmBtn2 = () => ({ x: tm.x + 58, y: tm.y + 38, w: 46, h: 18 });
+
+  function drawTimer() {
+    ctx.save();
+    ctx.globalAlpha = 0.96;
+    ctx.fillStyle = '#f8fafc';
+    rr(tm.x, tm.y, 112, 62, 7); ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = '#8aa0b5'; ctx.lineWidth = 1.2;
+    rr(tm.x, tm.y, 112, 62, 7); ctx.stroke();
+    // readout
+    ctx.fillStyle = '#eef3f8';
+    rr(tm.x + 8, tm.y + 7, 96, 24, 4); ctx.fill();
+    ctx.strokeStyle = '#c2cfdb'; ctx.lineWidth = 1;
+    rr(tm.x + 8, tm.y + 7, 96, 24, 4); ctx.stroke();
+    ctx.fillStyle = '#16344f';
+    ctx.font = '600 14px Consolas, monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(timer.t.toFixed(2) + ' s', tm.x + 56, tm.y + 20);
+    // buttons
+    const b1 = tmBtn1(), b2 = tmBtn2();
+    ctx.fillStyle = timer.running ? '#fdeaea' : '#e8f4e8';
+    rr(b1.x, b1.y, b1.w, b1.h, 4); ctx.fill();
+    ctx.strokeStyle = '#8aa0b5'; rr(b1.x, b1.y, b1.w, b1.h, 4); ctx.stroke();
+    ctx.fillStyle = '#f0f4f8';
+    rr(b2.x, b2.y, b2.w, b2.h, 4); ctx.fill();
+    rr(b2.x, b2.y, b2.w, b2.h, 4); ctx.stroke();
+    ctx.fillStyle = '#2c3e50'; ctx.font = '600 10px Segoe UI';
+    ctx.fillText(timer.running ? 'pause' : 'start', b1.x + b1.w / 2, b1.y + b1.h / 2 + 0.5);
+    ctx.fillText('reset', b2.x + b2.w / 2, b2.y + b2.h / 2 + 0.5);
+    ctx.restore();
+  }
+
+  // ── On-canvas playback controls ──────────────────────────────────────
+  const RAD_SLOW = { x: 280, y: 341, w: 100, h: 16 };
+  const RAD_NORM = { x: 280, y: 359, w: 100, h: 16 };
+  const BTN_PAUSE = { x: 425, y: 357, r: 15.5 };
+  const BTN_STEP = { x: 463, y: 357, r: 11 };
+  const BTN_RESET = { x: 781, y: 17, r: 11 };
+
+  function drawRadio(cx, cy, on, label) {
+    ctx.beginPath(); ctx.arc(cx, cy, 6.5, 0, Math.PI * 2);
+    ctx.fillStyle = '#fff'; ctx.fill();
+    ctx.strokeStyle = '#5a6e80'; ctx.lineWidth = 1.4; ctx.stroke();
+    if (on) {
+      ctx.beginPath(); ctx.arc(cx, cy, 3.4, 0, Math.PI * 2);
+      ctx.fillStyle = '#3a78b5'; ctx.fill();
+    }
+    ctx.fillStyle = '#33495c'; ctx.font = '11.5px Segoe UI';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(label, cx + 11, cy + 0.5);
+  }
+
+  function drawPlayback() {
+    drawRadio(288, 349, cfg.slow, 'Slow motion');
+    drawRadio(288, 367, !cfg.slow, 'Normal');
+    // pause / play
+    ctx.beginPath(); ctx.arc(BTN_PAUSE.x, BTN_PAUSE.y, BTN_PAUSE.r, 0, Math.PI * 2);
+    ctx.fillStyle = '#5b9bd5'; ctx.fill();
+    ctx.strokeStyle = '#3b6f9e'; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.fillStyle = '#fff';
+    if (paused) {  // play triangle
+      ctx.beginPath();
+      ctx.moveTo(BTN_PAUSE.x - 4, BTN_PAUSE.y - 7);
+      ctx.lineTo(BTN_PAUSE.x + 7, BTN_PAUSE.y);
+      ctx.lineTo(BTN_PAUSE.x - 4, BTN_PAUSE.y + 7);
+      ctx.closePath(); ctx.fill();
+    } else {       // pause bars
+      ctx.fillRect(BTN_PAUSE.x - 6, BTN_PAUSE.y - 7, 4.5, 14);
+      ctx.fillRect(BTN_PAUSE.x + 1.5, BTN_PAUSE.y - 7, 4.5, 14);
+    }
+    // single step
+    ctx.beginPath(); ctx.arc(BTN_STEP.x, BTN_STEP.y, BTN_STEP.r, 0, Math.PI * 2);
+    ctx.fillStyle = '#e3eaf1'; ctx.fill();
+    ctx.strokeStyle = '#9fb2c2'; ctx.lineWidth = 1.4; ctx.stroke();
+    ctx.fillStyle = '#33536e';
+    ctx.beginPath();
+    ctx.moveTo(BTN_STEP.x - 5, BTN_STEP.y - 5);
+    ctx.lineTo(BTN_STEP.x + 2, BTN_STEP.y);
+    ctx.lineTo(BTN_STEP.x - 5, BTN_STEP.y + 5);
+    ctx.closePath(); ctx.fill();
+    ctx.fillRect(BTN_STEP.x + 3, BTN_STEP.y - 5, 2.5, 10);
+  }
+
+  function drawReset() {
+    ctx.beginPath(); ctx.arc(BTN_RESET.x, BTN_RESET.y, BTN_RESET.r, 0, Math.PI * 2);
+    ctx.fillStyle = '#f3f6f9'; ctx.fill();
+    ctx.strokeStyle = '#9fb2c2'; ctx.lineWidth = 1.3; ctx.stroke();
+    // circular-arrow glyph
+    ctx.strokeStyle = '#d2622a'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(BTN_RESET.x, BTN_RESET.y, 5.5, -0.4 * Math.PI, 1.1 * Math.PI);
+    ctx.stroke();
+    const a = 1.1 * Math.PI;
+    const hx = BTN_RESET.x + 5.5 * Math.cos(a), hy = BTN_RESET.y + 5.5 * Math.sin(a);
+    ctx.fillStyle = '#d2622a';
+    ctx.beginPath();
+    ctx.moveTo(hx - 3, hy - 3.5); ctx.lineTo(hx + 3.5, hy - 1); ctx.lineTo(hx - 2.5, hy + 3);
+    ctx.closePath(); ctx.fill();
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#fbfcfe'; ctx.fillRect(0, 0, W, H);
+
+    drawEquilibrium();
+    drawDriver();
+    drawString();
+    if (cfg.end === 'fixed') drawFixedEnd();
+    else if (cfg.end === 'loose') drawLooseEnd();
+
+    if (cfg.refline) drawRefLine();
+    if (cfg.rulers) { drawHRuler(); drawVRuler(); }
+    if (cfg.timer) drawTimer();
+
+    if (!CLEAN) {
+      drawPlayback();
+      drawReset();
+      if (!interacted && cfg.mode === 'manual') {
+        ctx.fillStyle = '#9fb3c4'; ctx.font = '13px Segoe UI';
+        ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+        ctx.fillText('Drag the driver handle ↕', 110, EQY - 42);
+      }
+    }
+  }
+
+  // ── Animation loop ───────────────────────────────────────────────────
+  let lastTs = null;
+  function frame(ts) {
+    if (lastTs === null) lastTs = ts;
+    const dt = Math.min((ts - lastTs) / 1000, 0.05);
+    lastTs = ts;
+    if (!paused) {
+      acc += dt * (cfg.slow ? 0.25 : 1);
+      while (acc >= DT_SUB) { stepPhysics(); acc -= DT_SUB; }
+    }
+    draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // ── Pointer interaction ──────────────────────────────────────────────
+  const pos = e => {
+    const r = canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  };
+  const inRect = (p, r) => p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+  const inCircle = (p, c) => Math.hypot(p.x - c.x, p.y - c.y) <= c.r + 2;
+  const refPx = () => RULER_BOT - refY * PX_PER_CM;
+  const hitDriver = p => {
+    const cy = EQY - y[0] * PX_PER_CM;
+    return Math.hypot(p.x - CARX, p.y - cy) < 26 ||
+           (p.x < 96 && Math.abs(p.y - cy) < 28);
+  };
+  let hoverItem = null;
+
+  // returns which item the pointer is over (priority = z-order, top first)
+  function hitTest(p) {
+    if (!CLEAN) {
+      if (inCircle(p, BTN_RESET)) return 'reset';
+      if (inCircle(p, BTN_PAUSE)) return 'pause';
+      if (inCircle(p, BTN_STEP)) return 'stepbtn';
+      if (inRect(p, RAD_SLOW)) return 'slow';
+      if (inRect(p, RAD_NORM)) return 'norm';
+    }
+    if (cfg.timer) {
+      if (inRect(p, tmBtn1())) return 'tbtn1';
+      if (inRect(p, tmBtn2())) return 'tbtn2';
+      if (inRect(p, tmBody())) return 'timer';
+    }
+    if (cfg.rulers) {
+      if (inRect(p, { x: vr.x, y: vr.y, w: 28, h: 360 })) return 'vr';
+      if (inRect(p, { x: hr.x, y: hr.y, w: 630, h: 28 })) return 'hr';
+    }
+    if (cfg.refline && p.x > 24 && Math.abs(p.y - refPx()) < 9) return 'ref';
+    if (cfg.mode === 'manual' && hitDriver(p)) return 'driver';
+    return null;
+  }
+
+  canvas.addEventListener('pointerdown', e => {
+    const p = pos(e);
+    interacted = true;
+    const hit = hitTest(p);
+    switch (hit) {
+      case 'reset':   resetAll(); return;
+      case 'pause':   paused = !paused; return;
+      case 'stepbtn': stepOnce(); return;
+      case 'slow':    cfg.slow = true; return;
+      case 'norm':    cfg.slow = false; return;
+      case 'tbtn1':   timer.running = !timer.running; return;
+      case 'tbtn2':   timer.t = 0; return;
+      case 'timer':   drag = { type: 'timer', dx: p.x - tm.x, dy: p.y - tm.y }; break;
+      case 'vr':      drag = { type: 'vr', dx: p.x - vr.x, dy: p.y - vr.y }; break;
+      case 'hr':      drag = { type: 'hr', dx: p.x - hr.x, dy: p.y - hr.y }; break;
+      case 'ref':     drag = { type: 'ref', dy: p.y - refPx() }; break;
+      case 'driver':
+        drag = { type: 'driver' };
+        manualY = Math.max(-1.8, Math.min(1.8, (EQY - p.y) / PX_PER_CM));
+        break;
+      default: return;
+    }
+    canvas.setPointerCapture(e.pointerId);
+  });
+
+  canvas.addEventListener('pointermove', e => {
+    const p = pos(e);
+    if (drag) {
+      const cl = (val, lo, hi) => Math.max(lo, Math.min(hi, val));
+      if (drag.type === 'driver') {
+        manualY = cl((EQY - p.y) / PX_PER_CM, -1.8, 1.8);
+      } else if (drag.type === 'hr') {
+        hr.x = cl(p.x - drag.dx, 2, W - 632);
+        hr.y = cl(p.y - drag.dy, 2, H - 30);
+      } else if (drag.type === 'vr') {
+        vr.x = cl(p.x - drag.dx, 2, W - 30);
+        vr.y = cl(p.y - drag.dy, 2, H - 362);
+      } else if (drag.type === 'timer') {
+        tm.x = cl(p.x - drag.dx, 2, W - 114);
+        tm.y = cl(p.y - drag.dy, 2, H - 64);
+      } else if (drag.type === 'ref') {
+        refY = cl((RULER_BOT - (p.y - drag.dy)) / PX_PER_CM, 0, 4);
+      }
+      canvas.style.cursor = 'grabbing';
+      hoverItem = drag.type === 'driver' ? 'driver' : drag.type;
+      return;
+    }
+    hoverItem = hitTest(p);
+    canvas.style.cursor =
+      hoverItem === null ? 'default' :
+      ['reset', 'pause', 'stepbtn', 'slow', 'norm', 'tbtn1', 'tbtn2'].includes(hoverItem) ? 'pointer' : 'grab';
+  });
+
+  function endDrag(e) {
+    if (drag && canvas.hasPointerCapture && canvas.hasPointerCapture(e.pointerId)) {
+      canvas.releasePointerCapture(e.pointerId);
+    }
+    drag = null;
+  }
+  canvas.addEventListener('pointerup', endDrag);
+  canvas.addEventListener('pointercancel', endDrag);
+  canvas.addEventListener('pointerleave', () => { if (!drag) hoverItem = null; });
+
+  // Keyboard conveniences (need iframe focus; everything also works by mouse):
+  //   space = pause/play, . or ArrowRight = step, R = restart string
+  window.addEventListener('keydown', e => {
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLButtonElement) return;
+    if (e.code === 'Space') { paused = !paused; e.preventDefault(); }
+    else if (e.key === '.' || e.code === 'ArrowRight') stepOnce();
+    else if (e.key === 'r' || e.key === 'R') restartString();
+  });
+
+  // ── HTML control bar wiring ──────────────────────────────────────────
+  const $ = id => document.getElementById(id);
+  const radios = name => Array.from(document.querySelectorAll(`input[name=${name}]`));
+
+  function setMode(m) {
+    if (m === cfg.mode) return;
+    cfg.mode = m;
+    if (m === 'manual') manualY = y[0];
+    else if (m === 'oscillate') {
+      // phase continuity: resume the sine from the driver's current height
+      const s = Math.max(-1, Math.min(1, y[0] / Math.max(cfg.amp, 1e-6)));
+      phase = Math.asin(s);
+    } else pulseT = -1;
+    syncSignalRows();
+  }
+
+  function syncSignalRows() {
+    $('rowManual').classList.toggle('hidden', cfg.mode !== 'manual');
+    $('rowAmp').classList.toggle('hidden', cfg.mode === 'manual');
+    $('rowFreq').classList.toggle('hidden', cfg.mode !== 'oscillate');
+    $('rowWidth').classList.toggle('hidden', cfg.mode !== 'pulse');
+    $('rowSend').classList.toggle('hidden', cfg.mode !== 'pulse');
+  }
+
+  function syncControls() {
+    radios('mode').forEach(r => { r.checked = (r.value === cfg.mode); });
+    radios('tension').forEach(r => { r.checked = (r.value === cfg.tension); });
+    radios('end').forEach(r => { r.checked = (r.value === cfg.end); });
+    $('ampVal').textContent = cfg.amp.toFixed(2); $('ampSl').value = cfg.amp;
+    $('freqVal').textContent = cfg.freq.toFixed(2); $('freqSl').value = cfg.freq;
+    $('pwVal').textContent = cfg.width.toFixed(2); $('pwSl').value = cfg.width;
+    $('dampSl').value = cfg.damping;
+    $('ckRulers').checked = cfg.rulers;
+    $('ckRef').checked = cfg.refline;
+    $('ckTimer').checked = cfg.timer;
+    syncSignalRows();
+  }
+
+  radios('mode').forEach(r => r.addEventListener('change', () => setMode(r.value)));
+  radios('tension').forEach(r => r.addEventListener('change', () => { cfg.tension = r.value; }));
+  radios('end').forEach(r => r.addEventListener('change', () => { cfg.end = r.value; }));
+
+  function bump(key, d, lo, hi) {
+    cfg[key] = Math.min(hi, Math.max(lo, Math.round((cfg[key] + d) * 100) / 100));
+    syncControls();
+  }
+  $('ampDn').addEventListener('click', () => bump('amp', -0.01, 0, 1.3));
+  $('ampUp').addEventListener('click', () => bump('amp', +0.01, 0, 1.3));
+  $('freqDn').addEventListener('click', () => bump('freq', -0.01, 0, 3));
+  $('freqUp').addEventListener('click', () => bump('freq', +0.01, 0, 3));
+  $('pwDn').addEventListener('click', () => bump('width', -0.01, 0.1, 1));
+  $('pwUp').addEventListener('click', () => bump('width', +0.01, 0.1, 1));
+  $('ampSl').addEventListener('input', e => { cfg.amp = +e.target.value; $('ampVal').textContent = cfg.amp.toFixed(2); });
+  $('freqSl').addEventListener('input', e => { cfg.freq = +e.target.value; $('freqVal').textContent = cfg.freq.toFixed(2); });
+  $('pwSl').addEventListener('input', e => { cfg.width = +e.target.value; $('pwVal').textContent = cfg.width.toFixed(2); });
+  $('dampSl').addEventListener('input', e => { cfg.damping = +e.target.value; });
+  $('ckRulers').addEventListener('change', e => { cfg.rulers = e.target.checked; });
+  $('ckRef').addEventListener('change', e => { cfg.refline = e.target.checked; });
+  $('ckTimer').addEventListener('change', e => { cfg.timer = e.target.checked; });
+  $('restartBtn').addEventListener('click', restartString);
+  $('sendBtn').addEventListener('click', () => {
+    if (cfg.mode === 'pulse' && pulseT < 0) pulseT = 0;
+  });
+
+  // gray the send button while a pulse is in flight
+  setInterval(() => { $('sendBtn').disabled = (pulseT >= 0); }, 100);
+
+  // capture hook: sets the sign of the next pulse (+1 up / -1 inverted) so the
+  // headless capture can launch opposite-sign pulses for the collide demo.
+  window.__setPulseSign = s => { pulseSign = (s < 0 ? -1 : 1); };
+
+  // capture hook: seed two TRIANGLE pulses directly onto the string moving toward
+  // each other (a right-mover centred at xL, a left-mover centred at xR, each of
+  // amplitude A cm and half-width w cm). Used only for the superposition stills so
+  // the triangles stay crisp (they travel only a short way before overlapping,
+  // avoiding the dispersion that rounds a far-travelled, reflected pulse).
+  window.__seedTriangles = (A, w, xL, xR) => {
+    const c = SPEEDS[cfg.tension];
+    y.fill(0); v.fill(0);
+    for (let i = 0; i < N; i++) {
+      const x = i * DX;
+      const dL = x - xL;                                   // right-moving triangle
+      if (Math.abs(dL) < w) {
+        const slope = -A / w * Math.sign(dL || 1);         // dy/dx of the triangle
+        y[i] += A * (1 - Math.abs(dL) / w);
+        v[i] += -c * slope;                                // right-mover: v = -c * dy/dx
+      }
+      const dR = x - xR;                                   // left-moving triangle
+      if (Math.abs(dR) < w) {
+        const slope = -A / w * Math.sign(dR || 1);
+        y[i] += A * (1 - Math.abs(dR) / w);
+        v[i] += +c * slope;                                // left-mover: v = +c * dy/dx
+      }
+    }
+    pulseT = -1; manualY = 0; paused = false;
+  };
+
+  // ── Go ───────────────────────────────────────────────────────────────
+  syncControls();
+})();
+</script>
+</body>
+</html>
